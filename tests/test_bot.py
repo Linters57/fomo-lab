@@ -45,6 +45,27 @@ class BotCase(unittest.TestCase):
         return [json.loads(row[0]) for row in self.store.db.execute(
             'SELECT body FROM events WHERE kind=? ORDER BY id', (kind,))]
 
+    def test_host_log_matches_committed_trades_and_scanned_tokens(self):
+        self.enter()
+        with patch('builtins.print') as output:
+            cursor = bot.log_committed_events(self.store, 0)
+        events = [json.loads(call.args[0].removeprefix('[fomo-paper] '))
+                  for call in output.call_args_list]
+        buy = next(row for row in events if row['event'] == 'BUY')
+        self.assertEqual(buy['cost'], self.events('BUY')[0]['cost'])
+        self.assertEqual(buy['cost_usdc'], bot.dollars(buy['cost']))
+        scans = [row for row in events if row['event'] == 'SCAN_TOKEN']
+        self.assertEqual(len(scans), 7)
+        self.assertEqual(scans[0]['reason'], 'warming_up')
+        self.assertIn('price', scans[0])
+        with patch('builtins.print') as output:
+            self.assertEqual(bot.log_committed_events(self.store, cursor), cursor)
+        output.assert_not_called()
+        self.store.event(START, 'REJECT', reason='uncommitted')
+        with self.assertRaises(RuntimeError):
+            bot.log_committed_events(self.store, cursor)
+        self.store.db.rollback()
+
     def test_next_cycle_entry_and_exact_integer_costs(self):
         self.warmup()
         state = self.store.load()

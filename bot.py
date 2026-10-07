@@ -712,6 +712,32 @@ def status(store):
             'last_cycle': s['last_cycle']}
 
 
+def log_committed_events(store, after_id):
+    """Mirror durable audit entries to private host logs, after commit only."""
+    if store.db.in_transaction:
+        raise RuntimeError('audit logging requires a committed transaction')
+    for event_id, ts, kind, raw in store.db.execute(
+            'SELECT id,ts,kind,body FROM events WHERE id > ? ORDER BY id', (after_id,)):
+        body = json.loads(raw)
+        if kind != 'EQUITY':
+            if kind == 'SCAN':
+                for mint, snapshot in store.db.execute(
+                        'SELECT mint,body FROM snapshots WHERE ts=? ORDER BY mint', (ts,)):
+                    token = json.loads(snapshot)
+                    print('[fomo-paper] ' + json.dumps({
+                        'event': 'SCAN_TOKEN', 'ts': ts, 'audit_id': event_id,
+                        **token, 'reason': body['reasons'].get(mint, 'not_selected')
+                    }), flush=True)
+            readable = {key + '_usdc': dollars(body[key]) for key in
+                        ('cost', 'proceeds', 'pnl', 'modeled_setup', 'roundtrip_drag')
+                        if key in body}
+            print('[fomo-paper] ' + json.dumps({
+                'event': kind, 'ts': ts, 'audit_id': event_id,
+                **body, **readable}), flush=True)
+        after_id = event_id
+    return after_id
+
+
 def report(store, path):
     s = store.load()
     rows = store.db.execute("SELECT ts,kind,body FROM events WHERE kind != 'EQUITY' ORDER BY id DESC LIMIT 500").fetchall()
@@ -763,6 +789,7 @@ def run_paper(args, c):
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     with ProcessLock(args.db):
         store = Store(args.db, c, 'paper')
+        log_cursor = store.db.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()[0]
         market, safety = market_source(c), SolanaSafety()
         engine = Engine(store, c, Jupiter(), safety, clock=lambda: int(time.time()),
                         entries_allowed=lambda: not stop.is_set())
@@ -782,7 +809,8 @@ def run_paper(args, c):
                         store.event(int(time.time()), 'DATA_ERROR', reason=str(exc))
                     print(json.dumps({'data_error': str(exc), 'entries_blocked': True}), flush=True)
                 engine.step(snapshots, int(time.time()))
-                print(json.dumps(status(store)), flush=True)
+                log_cursor = log_committed_events(store, log_cursor)
+                print('[fomo-paper] ' + json.dumps({'event': 'STATUS', **status(store)}), flush=True)
                 report(store, args.report)
                 cycle += 1
                 if args.cycles and cycle >= args.cycles:
@@ -795,6 +823,7 @@ def run_paper(args, c):
                 store.event(int(time.time()), 'RUN_END', version=VERSION,
                             reason='signal' if stop.is_set() else 'cycle_limit'
                             if args.cycles and cycle >= args.cycles else 'error')
+            log_committed_events(store, log_cursor)
             store.close()
 
 

@@ -66,7 +66,7 @@ code van een bewegende GitHub-branch gedownload.
 
 ## Validatie
 
-41 Python-tests slagen: 37 voor de motor en vier voor de opslagcontrole. De tests
+42 Python-tests slagen: 38 voor de motor/logging en vier voor de opslagcontrole. De tests
 gebruiken fixtures. Een historische korte verbindingstest telde acht cycli,
 22 snapshots en nul trades; een latere proef kreeg netwerktime-outs. Geen van
 beide bewijst rendement. Langdurige marktvalidatie en echte uitvoering ontbreken.
@@ -83,3 +83,22 @@ een API-key voor marktdata/quotes; deze code accepteert geen walletsleutel.
 - https://render.com/docs/disks
 - https://render.com/docs/native-runtimes
 - https://render.com/pricing
+
+## Live volgen op Render
+
+Open de bestaande worker in Render en kies **Logs**. Filter op `fomo-paper`.
+`SCAN_TOKEN` toont elke door de strategie beoordeelde munt, koers, liquiditeit,
+activiteit en de reden om over te slaan of een signaal te maken.
+Dit is de geselecteerde kandidatenlijst; het is geen volledige lijst van alle
+munten die Jupiter al vóór selectie heeft weggefilterd.
+`SIGNAL` is een kandidaat voor de volgende cyclus, nog geen aankoop.
+`BUY` en `SELL` zijn fictieve transacties; de extra velden met `_usdc` geven
+bedragen in leesbare USDC. `STATUS` toont saldo, posities, resultaat en stoplimieten.
+`DATA_ERROR` betekent dat de marktfeed niet goed gelezen kon worden.
+
+De hostlogs tonen alleen vastgelegde databasegebeurtenissen en herhalen bij een
+herstart niet het volledige verleden. Render bepaalt de bewaartermijn van logs.
+De volledige opgeslagen audit en snapshots blijven in
+`/var/data/fomo-lab/paper.sqlite`. Het bijgewerkte HTML-rapport staat in
+`/var/data/fomo-lab/paper-report.html`; dit is een bestand op de worker, geen
+publieke dashboardwebsite. Het rapport toont de laatste 500 gebeurtenissen.
