@@ -24,7 +24,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-VERSION = '0.1.1'
+VERSION = '0.2.0'
 USD = 1_000_000
 USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 SOL = 'So11111111111111111111111111111111111111112'
@@ -568,7 +568,8 @@ class Engine:
                 if s['day_start'] - equity >= c.daily_loss:
                     s['day_halted'] = True
             global_block = ('unpriced_position' if unpriced else 'total_loss_limit' if s['halted']
-                            else 'daily_loss_limit' if s['day_halted'] else None)
+                            else 'daily_loss_limit' if s['day_halted'] else
+                            'manually_paused' if s.get('dashboard_paused') else None)
             # Execute a prior-cycle signal only after a fresh market + safety recheck.
             for mint, pending in sorted(old_pending.items()):
                 snap = current.get(mint)
@@ -661,7 +662,9 @@ class Engine:
                 if not reason:
                     s['pending'][mint] = {'ts': ts, 'price': snap.price}
                     db.event(ts, 'SIGNAL', mint=mint, symbol=snap.symbol)
-            db.event(ts, 'SCAN', candidates=len(current), reasons=scan_reasons)
+            db.event(ts, 'SCAN', candidates=len(current), reasons=scan_reasons,
+                     tokens=[{**asdict(item), 'reason': scan_reasons[item.mint]}
+                             for item in current.values()])
             # Bounded active memory; full snapshots remain in the audit database.
             keep = set(current) | set(s['positions'])
             s['history'] = {m: h for m, h in s['history'].items() if m in keep}
@@ -721,9 +724,8 @@ def log_committed_events(store, after_id):
         body = json.loads(raw)
         if kind != 'EQUITY':
             if kind == 'SCAN':
-                for mint, snapshot in store.db.execute(
-                        'SELECT mint,body FROM snapshots WHERE ts=? ORDER BY mint', (ts,)):
-                    token = json.loads(snapshot)
+                for token in body.get('tokens', []):
+                    mint = token['mint']
                     print('[fomo-paper] ' + json.dumps({
                         'event': 'SCAN_TOKEN', 'ts': ts, 'audit_id': event_id,
                         **token, 'reason': body['reasons'].get(mint, 'not_selected')
@@ -784,11 +786,15 @@ def run_demo(args, c):
 
 
 def run_paper(args, c):
+    import dashboard_state as dashboard
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     with ProcessLock(args.db):
+        c = dashboard.restore_config(args.db, c, Config)
         store = Store(args.db, c, 'paper')
+        dashboard_path = Path(args.db).parent / 'dashboard.json'
+        command_path = Path(args.db).parent / 'dashboard-command.json'
         log_cursor = store.db.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()[0]
         market, safety = market_source(c), SolanaSafety()
         engine = Engine(store, c, Jupiter(), safety, clock=lambda: int(time.time()),
@@ -799,6 +805,8 @@ def run_paper(args, c):
             cycle, failures = 0, 0
             while not stop.is_set() and (args.cycles == 0 or cycle < args.cycles):
                 begun = time.monotonic()
+                dashboard.apply_command(store, engine, command_path, Config)
+                c = engine.c
                 snapshots = []
                 try:
                     snapshots = market.collect(store.load()['positions'])
@@ -812,6 +820,7 @@ def run_paper(args, c):
                 log_cursor = log_committed_events(store, log_cursor)
                 print('[fomo-paper] ' + json.dumps({'event': 'STATUS', **status(store)}), flush=True)
                 report(store, args.report)
+                dashboard.export(store, dashboard_path, status)
                 cycle += 1
                 if args.cycles and cycle >= args.cycles:
                     break
@@ -824,6 +833,7 @@ def run_paper(args, c):
                             reason='signal' if stop.is_set() else 'cycle_limit'
                             if args.cycles and cycle >= args.cycles else 'error')
             log_committed_events(store, log_cursor)
+            dashboard.export(store, dashboard_path, status)
             store.close()
 
 

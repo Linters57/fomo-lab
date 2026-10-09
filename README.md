@@ -66,7 +66,7 @@ code van een bewegende GitHub-branch gedownload.
 
 ## Validatie
 
-42 Python-tests slagen: 38 voor de motor/logging en vier voor de opslagcontrole. De tests
+47 Python-tests slagen, inclusief logging, opslag en dashboardbediening. De tests
 gebruiken fixtures. Een historische korte verbindingstest telde acht cycli,
 22 snapshots en nul trades; een latere proef kreeg netwerktime-outs. Geen van
 beide bewijst rendement. Langdurige marktvalidatie en echte uitvoering ontbreken.
@@ -102,3 +102,27 @@ De volledige opgeslagen audit en snapshots blijven in
 `/var/data/fomo-lab/paper.sqlite`. Het bijgewerkte HTML-rapport staat in
 `/var/data/fomo-lab/paper-report.html`; dit is een bestand op de worker, geen
 publieke dashboardwebsite. Het rapport toont de laatste 500 gebeurtenissen.
+
+## Online dashboard (0.2)
+
+Het bestaande Render-webproces biedt `/paper` met een aparte toegangscode,
+HttpOnly sessiecookie (12 uur) en controles op verzoekherkomst. Geen API- of
+walletsleutels in de browser. De code van de webinterface en de beperkte
+Redis-koppeling staat in `Linters57/collector-monitor`.
+
+Het dashboard toont de laatste scan, maximaal 500 transacties, 160 recente
+gebeurtenissen en 720 waardemetingen. CSV exporteert de geselecteerde recente
+transacties. De complete database blijft op de permanente disk. Redis bevat
+slechts één begrensde kopie van maximaal 384 kB en één tijdelijke opdracht;
+het is geen permanente tradingdatabase.
+
+Nieuwe aankopen pauzeren/hervatten is mogelijk. Verkoopregels blijven werken.
+Instellingen zijn beperkt tot positie-inleg (1–10 USDC), aantal posities (1–2),
+stop-loss (5–10%) en take-profit (8–30%). Aanpassen kan alleen zonder open
+posities. Verlieslimieten blijven actief en kunnen niet worden gereset via
+het dashboard. Een opdracht wordt nooit als toegepast getoond vóór de bot
+haar in SQLite heeft vastgelegd. Opdrachten verlopen na 180 seconden;
+herstart herstelt de laatst bevestigde pauze en instellingen.
+
+Zonder gekoppelde permanente disk blijft de bot uit. Het online dashboard
+is dan bereikbaar, maar toont expliciet dat nog geen data beschikbaar is.
