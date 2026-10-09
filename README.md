@@ -155,3 +155,10 @@ verliesstops. Nog niet uitgevoerde signalen vervallen. Nieuwe stop- en winstrege
 gelden ook voor eventuele bestaande posities vanaf de volgende cyclus.
 Latere dashboardwijzigingen blijven bij herstart behouden. Marktfilters en
 maximale houdtijd (60 minuten) blijven gelijk; meer risico forceert geen trades.
+
+## Tweede experiment: Actief (0.3)
+
+De gedeelde runner voert nu Momentum en Actief uit met onafhankelijke databases,
+saldi, opdrachten en dashboardtabs. Zie [STRATEGY-RESEARCH.md](STRATEGY-RESEARCH.md)
+voor bronnen, alle criteria, kosten en bewaartermijnen. Instellingen voor Actief
+staan in `active-config.json`. Het dashboard biedt ook een vergelijking.

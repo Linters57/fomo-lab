@@ -47,9 +47,8 @@ def run():
     import bot
     print('[fomo-paper] permanent disk verified; paper only; 192 MiB address-space limit', flush=True)
     try:
-        return bot.main(['--config', str(Path(__file__).with_name('shared-config.json')),
-                         'paper', '--db', str(data / 'paper.sqlite'),
-                         '--report', str(data / 'paper-report.html')])
+        import fleet
+        return fleet.run(data)
     except (ValueError, bot.DataError) as exc:
         # A config/database mismatch needs intervention, not a restart loop.
         print(f'[fomo-paper] stopped: {exc}', flush=True)

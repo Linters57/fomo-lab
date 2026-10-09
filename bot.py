@@ -24,7 +24,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-VERSION = '0.2.2'
+VERSION = '0.3.0'
 USD = 1_000_000
 USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 SOL = 'So11111111111111111111111111111111111111112'
@@ -501,7 +501,22 @@ class Engine:
             return 'momentum_outside_range'
         return None
 
-    def step(self, snapshots, ts):
+    def pending_items(self, pending, current):
+        return sorted(pending.items())
+
+    def exit_reason(self, pos, net, ts):
+        ret_bps = (net - pos['cost']) * 10000 // pos['cost']
+        return ('stop_loss' if ret_bps <= -self.c.stop_bps else
+                'take_profit' if ret_bps >= self.c.take_profit_bps else
+                'time_exit' if ts - pos['opened'] >= self.c.max_hold_seconds else None)
+
+    def history_seconds(self):
+        return self.c.warmup_seconds
+
+    def keep_history(self, history, keep, ts):
+        return {m: h for m, h in history.items() if m in keep}
+
+    def step(self, snapshots, ts, discovery=None):
         c, db = self.c, self.store
         with db.db:
             db.db.execute('BEGIN IMMEDIATE')
@@ -528,7 +543,7 @@ class Engine:
                 if not history or item.observed > history[-1][0]:
                     history.append([item.observed, item.price, item.pair])
                 # Include one observation just before the lookback boundary.
-                while len(history) > 2 and history[1][0] <= ts - c.warmup_seconds:
+                while len(history) > 2 and history[1][0] <= ts - self.history_seconds():
                     history.pop(0)
             old_pending = s['pending']
             s['pending'] = {}
@@ -543,10 +558,7 @@ class Engine:
                     db.event(ts, 'UNPRICED', mint=mint, reason=str(exc))
                     continue
                 marks[mint] = net
-                ret_bps = (net - pos['cost']) * 10000 // pos['cost']
-                reason = ('stop_loss' if ret_bps <= -c.stop_bps else
-                          'take_profit' if ret_bps >= c.take_profit_bps else
-                          'time_exit' if ts - pos['opened'] >= c.max_hold_seconds else None)
+                reason = self.exit_reason(pos, net, ts)
                 if reason:
                     pnl = net - pos['cost']
                     s['cash'] += net
@@ -571,7 +583,7 @@ class Engine:
                             else 'daily_loss_limit' if s['day_halted'] else
                             'manually_paused' if s.get('dashboard_paused') else None)
             # Execute a prior-cycle signal only after a fresh market + safety recheck.
-            for mint, pending in sorted(old_pending.items()):
+            for mint, pending in self.pending_items(old_pending, current):
                 snap = current.get(mint)
                 reason = global_block
                 if not reason and not snap:
@@ -660,14 +672,14 @@ class Engine:
                 reason = reason or self.gate(snap, s['history'].get(mint, []), ts)
                 scan_reasons[mint] = reason or 'signal_for_next_cycle'
                 if not reason:
-                    s['pending'][mint] = {'ts': ts, 'price': snap.price}
+                    s['pending'][mint] = {'ts': ts, 'price': snap.price, 'observed': snap.observed}
                     db.event(ts, 'SIGNAL', mint=mint, symbol=snap.symbol)
-            db.event(ts, 'SCAN', candidates=len(current), reasons=scan_reasons,
+            db.event(ts, 'SCAN', candidates=len(current), reasons=scan_reasons, discovery=discovery,
                      tokens=[{**asdict(item), 'reason': scan_reasons[item.mint]}
                              for item in current.values()])
             # Bounded active memory; full snapshots remain in the audit database.
             keep = set(current) | set(s['positions'])
-            s['history'] = {m: h for m, h in s['history'].items() if m in keep}
+            s['history'] = self.keep_history(s['history'], keep, ts)
             s['cooldowns'] = {m: until for m, until in s['cooldowns'].items() if until > ts}
             s.update(last_cycle=ts, equity=s['cash'] + sum(marks.values()) - s['operating_cost'],
                      unpriced=unpriced)

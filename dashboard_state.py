@@ -18,7 +18,8 @@ def atomic_json(path, value):
     temp.replace(path)
 
 
-def restore_config(path, base, Config):
+def restore_config(path, base, Config, limits=None):
+    limits = LIMITS if limits is None else limits
     if not Path(path).exists():
         return base
     import sqlite3
@@ -30,7 +31,7 @@ def restore_config(path, base, Config):
     # Only values explicitly changed via the dashboard may differ from base.
     overrides = state.get('dashboard_overrides', {})
     for key, value in overrides.items():
-        if key not in LIMITS or type(value) is not int or not LIMITS[key][0] <= value <= LIMITS[key][1]:
+        if key not in limits or type(value) is not int or not limits[key][0] <= value <= limits[key][1]:
             raise ValueError('invalid saved dashboard setting')
     return Config(**{**asdict(base), **overrides}).validate()
 
@@ -115,7 +116,8 @@ def migrate_authorized_strategy(path, target, Config, now=None):
         db.close()
 
 
-def apply_command(store, engine, path, Config, now=None):
+def apply_command(store, engine, path, Config, now=None, limits=None):
+    limits = LIMITS if limits is None else limits
     now = int(time.time()) if now is None else now
     try:
         if not path.exists() or path.stat().st_size > 4096:
@@ -147,7 +149,7 @@ def apply_command(store, engine, path, Config, now=None):
             if not isinstance(changes, dict) or not changes:
                 raise ValueError('Geen geldige instellingen.')
             for key, value in changes.items():
-                if key not in LIMITS or type(value) is not int or not LIMITS[key][0] <= value <= LIMITS[key][1]:
+                if key not in limits or type(value) is not int or not limits[key][0] <= value <= limits[key][1]:
                     raise ValueError('Instelling buiten de toegestane grenzen.')
             updated_config = Config(**{**state['config'], **changes}).validate()
             state['config'] = asdict(updated_config)
@@ -171,7 +173,7 @@ def apply_command(store, engine, path, Config, now=None):
         engine.c = updated_config
 
 
-def export(store, path, status_fn, now=None):
+def export(store, path, status_fn, now=None, limits=None, profile=None, max_bytes=350_000):
     now = int(time.time()) if now is None else now
     state = store.load()
     def events(where, limit):
@@ -201,10 +203,11 @@ def export(store, path, status_fn, now=None):
                    tokens=scan[0].get('tokens', []) if scan else [],
                    scan_ts=scan[0]['ts'] if scan else None,
                    events=recent, trades=trades, curve=curve, capital_adjusted=bool(funding),
-                   wins=state['wins'], started=state['started'], limits=LIMITS,
+                   wins=state['wins'], started=state['started'], limits=LIMITS if limits is None else limits, profile=profile,
+                   discovery=scan[0].get("discovery") if scan else None,
                    total_events=store.db.execute('SELECT COUNT(*) FROM events').fetchone()[0])
     # Explicit retention limits in UI; trading ledger is never trimmed here.
-    while len(json.dumps(payload).encode()) > 350_000:
+    while len(json.dumps(payload).encode()) > max_bytes:
         if len(payload['events']) > 10:
             payload['events'] = payload['events'][:len(payload['events'])//2]
         elif len(payload['trades']) > 10:
