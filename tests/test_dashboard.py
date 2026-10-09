@@ -56,3 +56,35 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(data['tokens'][0]['reason'],'warming_up')
         self.assertEqual(data['status']['cash_usdc'],'100.0000')
         self.assertLess(p.stat().st_size,350000)
+    def test_capital_change_preserves_ledger_and_is_idempotent(self):
+        from dataclasses import replace
+        s=self.store.load();s.update(cash=97000000,equity=98000000,last_priced_equity=98000000,
+            realized=-2000000,closed=1,halted=True,day_halted=True)
+        s['positions']={'held':{'cost':1000000,'quantity':123,'symbol':'TEST','opened':START}}
+        self.store.save(s);self.store.db.commit()
+        target=replace(self.c,initial_cash=1000000000)
+        dash.migrate_authorized_capital(self.root/'paper.sqlite',target,START)
+        after=self.store.load()
+        self.assertEqual(after['cash'],997000000);self.assertEqual(after['equity'],998000000)
+        self.assertEqual(after['day_start'],1000000000)
+        for field in ['positions','realized','closed','halted','day_halted']:
+            self.assertEqual(after[field],s[field])
+        dash.migrate_authorized_capital(self.root/'paper.sqlite',target,START+1)
+        self.assertEqual(self.store.load(),after)
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM events WHERE kind='CAPITAL_CHANGE'").fetchone()[0],1)
+        resumed=bot.Store(self.root/'paper.sqlite',target,'paper');resumed.close()
+    def test_capital_change_is_not_chart_profit(self):
+        from dataclasses import replace
+        self.engine.step([bot.demo_snapshot(START,'1')],START)
+        dash.migrate_authorized_capital(self.root/'paper.sqlite',replace(self.c,initial_cash=1000000000),START+1)
+        p=self.root/'dashboard.json';dash.export(self.store,p,bot.status,START+2)
+        data=json.loads(p.read_text());self.assertTrue(data['capital_adjusted'])
+        self.assertEqual(data['curve'][0]['value'],1000000000)
+        self.assertEqual(data['status']['equity_usdc_estimate'],'1000.0000')
+        self.assertEqual(data['status']['realized_pnl_usdc'],'0.0000')
+    def test_capital_change_rejects_unrelated_setting_mismatch(self):
+        from dataclasses import replace
+        before=self.store.load()
+        with self.assertRaises(ValueError):
+            dash.migrate_authorized_capital(self.root/'paper.sqlite',replace(self.c,initial_cash=1000000000,daily_loss=999000000),START)
+        self.assertEqual(self.store.load(),before)

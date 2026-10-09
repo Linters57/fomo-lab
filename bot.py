@@ -24,7 +24,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-VERSION = '0.2.0'
+VERSION = '0.2.1'
 USD = 1_000_000
 USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 SOL = 'So11111111111111111111111111111111111111112'
@@ -756,7 +756,7 @@ def report(store, path):
     .grid div{{background:#1d2a37;padding:18px;border-radius:10px}}span{{display:block;color:#abc1d1;font-size:13px}}strong{{font-size:24px}}
     table{{border-collapse:collapse;width:100%;margin-top:24px}}td,th{{padding:12px;border-bottom:1px solid #344350;text-align:left;vertical-align:top}}
     pre{{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}}p{{max-width:900px;line-height:1.6}}</style>
-    <p class="tag">{label}</p><h1>Fomo Lab</h1><p>Een controleerbaar experiment met 100 virtuele USDC.
+    <p class="tag">{label}</p><h1>Fomo Lab</h1><p>Een controleerbaar experiment met {html.escape(dollars(s['config']['initial_cash']))} virtuele USDC.
     Koersen, quotes en vaste kostenaannames zijn geen uitvoeringsgarantie. Onprijsbare posities blijven open en tellen
     als nul in de expliciet conservatieve ondergrens. USDC = USD is een rekenaanname.</p><section class="grid">{cards}</section>
     <h2>Posities</h2><pre>{html.escape(json.dumps(s['positions'], indent=2))}</pre>
@@ -792,6 +792,7 @@ def run_paper(args, c):
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     with ProcessLock(args.db):
         c = dashboard.restore_config(args.db, c, Config)
+        dashboard.migrate_authorized_capital(args.db, c)
         store = Store(args.db, c, 'paper')
         dashboard_path = Path(args.db).parent / 'dashboard.json'
         command_path = Path(args.db).parent / 'dashboard-command.json'

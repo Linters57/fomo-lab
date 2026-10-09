@@ -35,6 +35,44 @@ def restore_config(path, base, Config):
     return Config(**{**asdict(base), **overrides}).validate()
 
 
+def migrate_authorized_capital(path, target, now=None):
+    """One-time requested 100 -> 1000 paper capital change, under ProcessLock.
+
+    Preserve trades, P&L, cost accrual and halt flags. Never count funding as profit.
+    No generic experiment reset or automatic acceptance of unrelated config changes.
+    """
+    if not Path(path).exists() or target.initial_cash != 1_000_000_000:
+        return
+    import sqlite3
+    db = sqlite3.connect(path, timeout=5)
+    try:
+        with db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT body FROM state WHERE id=1').fetchone()
+            if row is None:
+                return
+            state = json.loads(row[0])
+            old = state['config']['initial_cash']
+            if old == target.initial_cash:
+                return
+            expected = {**state['config'], 'initial_cash': target.initial_cash}
+            if state['mode'] != 'paper' or old != 100_000_000 or expected != asdict(target):
+                raise ValueError('capital migration does not match the authorized paper change')
+            delta = target.initial_cash - old
+            for key in ('cash', 'equity', 'last_priced_equity', 'day_start'):
+                state[key] += delta
+            state['config'] = asdict(target)
+            state['pending'] = {}
+            state['dashboard_revision'] = state.get('dashboard_revision', 0) + 1
+            db.execute('UPDATE state SET body=? WHERE id=1', (json.dumps(state),))
+            db.execute('INSERT INTO events(ts,kind,body) VALUES (?,?,?)',
+                       (int(time.time()) if now is None else now, 'CAPITAL_CHANGE',
+                        json.dumps(dict(previous=old, current=target.initial_cash,
+                                        delta=delta, reason='user_requested_starting_capital'))))
+    finally:
+        db.close()
+
+
 def apply_command(store, engine, path, Config, now=None):
     now = int(time.time()) if now is None else now
     try:
@@ -110,14 +148,17 @@ def export(store, path, status_fn, now=None):
         event.pop('quote', None)
         event.pop('exit_quote', None)
     scan = events("kind = 'SCAN'", 1)
-    curve = [dict(ts=ts, value=json.loads(raw)['value']) for ts, raw in store.db.execute(
-        "SELECT ts,body FROM events WHERE kind='EQUITY' ORDER BY id DESC LIMIT 720")][::-1]
+    funding = events("kind = 'CAPITAL_CHANGE'", 100)
+    curve = [dict(ts=ts, value=json.loads(raw)['value'] +
+                  sum(change['delta'] for change in funding if change['id'] > event_id))
+             for event_id, ts, raw in store.db.execute(
+        "SELECT id,ts,body FROM events WHERE kind='EQUITY' ORDER BY id DESC LIMIT 720")][::-1]
     payload = dict(schema=1, generated_at=now, status=status_fn(store), config=state['config'],
                    positions=state['positions'], paused=state.get('dashboard_paused', False),
                    revision=state.get('dashboard_revision', 0), ack=state.get('dashboard_ack'),
                    tokens=scan[0].get('tokens', []) if scan else [],
                    scan_ts=scan[0]['ts'] if scan else None,
-                   events=recent, trades=trades, curve=curve,
+                   events=recent, trades=trades, curve=curve, capital_adjusted=bool(funding),
                    wins=state['wins'], started=state['started'], limits=LIMITS,
                    total_events=store.db.execute('SELECT COUNT(*) FROM events').fetchone()[0])
     # Explicit retention limits in UI; trading ledger is never trimmed here.

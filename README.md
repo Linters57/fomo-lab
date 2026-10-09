@@ -126,3 +126,14 @@ herstart herstelt de laatst bevestigde pauze en instellingen.
 
 Zonder gekoppelde permanente disk blijft de bot uit. Het online dashboard
 is dan bereikbaar, maar toont expliciet dat nog geen data beschikbaar is.
+
+## Startkapitaal op de gedeelde host (0.2.1)
+
+`shared-config.json` stelt het virtuele startkapitaal in op 1.000 USDC.
+De expliciet gevraagde verhoging van het bestaande experiment van 100 naar
+1.000 wordt onder de proceslock één keer transactioneel toegepast. De audit
+krijgt `CAPITAL_CHANGE`; saldo en waarderingsreferenties stijgen met 900,
+terwijl bestaande trades, gerealiseerd resultaat en verliesstops behouden
+blijven. Dit is geen handelswinst. De online waardegrafiek corrigeert oudere
+meetpunten voor deze toevoeging en vermeldt dat zichtbaar.
+Andere configuratieverschillen worden niet automatisch geaccepteerd.
