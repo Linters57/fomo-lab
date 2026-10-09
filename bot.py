@@ -24,7 +24,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-VERSION = '0.2.1'
+VERSION = '0.2.2'
 USD = 1_000_000
 USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 SOL = 'So11111111111111111111111111111111111111112'
@@ -791,6 +791,7 @@ def run_paper(args, c):
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     with ProcessLock(args.db):
+        dashboard.migrate_authorized_strategy(args.db, c, Config)
         c = dashboard.restore_config(args.db, c, Config)
         dashboard.migrate_authorized_capital(args.db, c)
         store = Store(args.db, c, 'paper')

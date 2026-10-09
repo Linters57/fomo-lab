@@ -117,8 +117,8 @@ slechts één begrensde kopie van maximaal 384 kB en één tijdelijke opdracht;
 het is geen permanente tradingdatabase.
 
 Nieuwe aankopen pauzeren/hervatten is mogelijk. Verkoopregels blijven werken.
-Instellingen zijn beperkt tot positie-inleg (1–10 USDC), aantal posities (1–2),
-stop-loss (5–10%) en take-profit (8–30%). Aanpassen kan alleen zonder open
+Instellingen zijn beperkt tot positie-inleg (1–400 USDC), aantal posities (1–4),
+stop-loss (5–20%) en take-profit (8–60%). Aanpassen kan alleen zonder open
 posities. Verlieslimieten blijven actief en kunnen niet worden gereset via
 het dashboard. Een opdracht wordt nooit als toegepast getoond vóór de bot
 haar in SQLite heeft vastgelegd. Opdrachten verlopen na 180 seconden;
@@ -137,3 +137,21 @@ terwijl bestaande trades, gerealiseerd resultaat en verliesstops behouden
 blijven. Dit is geen handelswinst. De online waardegrafiek corrigeert oudere
 meetpunten voor deze toevoeging en vermeldt dat zichtbaar.
 Andere configuratieverschillen worden niet automatisch geaccepteerd.
+
+## Offensief paperprofiel bij 1.000 USDC (0.2.2)
+
+Op verzoek: maximaal 250 USDC per positie, 3 open posities, 200 USDC
+cashreserve, 30 USDC beoogd stoprisico per positie, 100 USDC dagverlies,
+250 USDC totaalverlies, maximaal 12 aankopen per dag, stop-loss 12% en
+winstdoel 24%. Dit is een testprofiel, geen bewezen optimale strategie.
+De effectieve inleg is het minimum van de positiegrens, risicobudget / stoppercentage,
+en beschikbare cash na reserve en kosten. Bij de standaardinstellingen is dat
+250 USDC en maximaal 750 USDC tegelijk belegd. Stopprijzen en verliesgrenzen
+zijn beslisregels; koerssprongen en kosten kunnen grotere verliezen veroorzaken.
+
+De eenmalige migratie accepteert uitsluitend het vorige gedeelde paperprofiel,
+logt STRATEGY_CHANGE en bewaart saldo, posities, P&L, dagtellingen, pauze en
+verliesstops. Nog niet uitgevoerde signalen vervallen. Nieuwe stop- en winstregels
+gelden ook voor eventuele bestaande posities vanaf de volgende cyclus.
+Latere dashboardwijzigingen blijven bij herstart behouden. Marktfilters en
+maximale houdtijd (60 minuten) blijven gelijk; meer risico forceert geen trades.

@@ -5,8 +5,8 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-LIMITS = {'max_position': (1_000_000, 10_000_000), 'max_positions': (1, 2),
-          'stop_bps': (500, 1000), 'take_profit_bps': (800, 3000)}
+LIMITS = {'max_position': (1_000_000, 400_000_000), 'max_positions': (1, 4),
+          'stop_bps': (500, 2000), 'take_profit_bps': (800, 6000)}
 
 
 def atomic_json(path, value):
@@ -69,6 +69,48 @@ def migrate_authorized_capital(path, target, now=None):
                        (int(time.time()) if now is None else now, 'CAPITAL_CHANGE',
                         json.dumps(dict(previous=old, current=target.initial_cash,
                                         delta=delta, reason='user_requested_starting_capital'))))
+    finally:
+        db.close()
+
+
+def migrate_authorized_strategy(path, target, Config, now=None):
+    """Apply the requested aggressive $1000 paper profile exactly once, under lock."""
+    authorized = Config(**{'initial_cash': 1000000000, 'monthly_operating_cost': 250000, 'max_position': 250000000, 'max_positions': 3, 'reserve': 200000000, 'risk_per_trade': 30000000, 'daily_loss': 100000000, 'total_loss': 250000000, 'max_daily_entries': 12, 'stop_bps': 1200, 'take_profit_bps': 2400}).validate()
+    if not Path(path).exists() or asdict(target) != asdict(authorized):
+        return
+    import sqlite3
+    db = sqlite3.connect(path, timeout=5)
+    try:
+        with db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT body FROM state WHERE id=1').fetchone()
+            if row is None:
+                return
+            state = json.loads(row[0])
+            if state.get('strategy_migration') == 'aggressive_1000_v1':
+                return
+            overrides = state.get('dashboard_overrides', {})
+            if state['config'] == {**asdict(authorized), **overrides}:
+                return
+            previous = asdict(Config(initial_cash=1_000_000_000, monthly_operating_cost=250_000))
+            old_limits = {'max_position': (1_000_000, 10_000_000), 'max_positions': (1, 2),
+                          'stop_bps': (500, 1000), 'take_profit_bps': (800, 3000)}
+            if any(k not in old_limits or type(v) is not int or not old_limits[k][0] <= v <= old_limits[k][1]
+                   for k, v in overrides.items()):
+                raise ValueError('unexpected prior strategy override')
+            if state['mode'] != 'paper' or state['config'] != {**previous, **overrides}:
+                raise ValueError('strategy migration does not match the authorized paper change')
+            before = state['config']
+            state['config'] = asdict(authorized)
+            state['dashboard_overrides'] = {}
+            state['pending'] = {}
+            state['strategy_migration'] = 'aggressive_1000_v1'
+            state['dashboard_revision'] = state.get('dashboard_revision', 0) + 1
+            db.execute('UPDATE state SET body=? WHERE id=1', (json.dumps(state),))
+            db.execute('INSERT INTO events(ts,kind,body) VALUES (?,?,?)',
+                       (int(time.time()) if now is None else now, 'STRATEGY_CHANGE',
+                        json.dumps(dict(profile='Offensief 1000', previous=before,
+                                        current=state['config'], reason='user_requested_risk_profile'))))
     finally:
         db.close()
 

@@ -43,7 +43,7 @@ class DashboardTests(unittest.TestCase):
         dash.apply_command(self.store,self.engine,self.root/'command.json',bot.Config,START)
         self.assertEqual(len(list(self.store.db.execute("SELECT * FROM events WHERE kind='CONTROL'"))),1)
     def test_rejects_expired_stale_unknown_and_risky_changes(self):
-        for i,changes in enumerate([{'expires':START-1},{'revision':9},{'action':'settings','settings':{'initial_cash':200000000}}, {'action':'settings','settings':{'max_position':11000000}}]):
+        for i,changes in enumerate([{'expires':START-1},{'revision':9},{'action':'settings','settings':{'initial_cash':200000000}}, {'action':'settings','settings':{'max_position':401000000}}]):
             s=self.command(id=str(i),**changes);self.assertFalse(s['dashboard_ack']['ok']);self.assertEqual(s['config'],asdict(self.c))
     def test_settings_cannot_change_open_trade(self):
         s=self.store.load();s['positions']={'fake':{'cost':10000000}};self.store.save(s);self.store.db.commit()
@@ -88,3 +88,58 @@ class DashboardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             dash.migrate_authorized_capital(self.root/'paper.sqlite',replace(self.c,initial_cash=1000000000,daily_loss=999000000),START)
         self.assertEqual(self.store.load(),before)
+
+class AggressiveProfileTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
+        self.path=self.root/'paper.sqlite'
+        self.old=bot.Config(initial_cash=1000000000,monthly_operating_cost=250000)
+        self.target=bot.Config.load(Path(__file__).resolve().parents[1]/'shared-config.json')
+        self.store=bot.Store(self.path,self.old,'paper')
+    def tearDown(self):
+        self.store.close();self.temp.cleanup()
+    def test_migration_preserves_ledger_and_future_dashboard_changes(self):
+        before=self.store.load()
+        before.update(cash=987000000,realized=-3000000,closed=2,entries_today=2,
+                      halted=True,day_halted=True,dashboard_paused=True)
+        before['positions']={'held':{'cost':10000000,'quantity':123,'symbol':'T','opened':START}}
+        before['pending']={'signal':{}}
+        before['dashboard_overrides']={'max_position':5000000}
+        before['config']['max_position']=5000000
+        self.store.save(before);self.store.db.commit()
+        dash.migrate_authorized_strategy(self.path,self.target,bot.Config,START)
+        after=self.store.load()
+        for k in ('cash','equity','last_priced_equity','day_start','positions','realized','closed',
+                  'entries_today','halted','day_halted','dashboard_paused','operating_cost'):
+            self.assertEqual(before[k],after[k],k)
+        self.assertEqual(after['config'],asdict(self.target));self.assertEqual(after['pending'],{})
+        after['dashboard_overrides']={'max_position':300000000}
+        after['config']['max_position']=300000000
+        self.store.save(after);self.store.db.commit()
+        dash.migrate_authorized_strategy(self.path,self.target,bot.Config,START+1)
+        self.assertEqual(self.store.load(),after)
+        restored=dash.restore_config(self.path,self.target,bot.Config)
+        self.assertEqual(restored.max_position,300000000)
+        bot.Store(self.path,restored,'paper').close()
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM events WHERE kind='STRATEGY_CHANGE'").fetchone()[0],1)
+    def test_unknown_previous_config_is_not_silently_migrated(self):
+        before=self.store.load();before['config']['min_liquidity']=1
+        self.store.save(before);self.store.db.commit()
+        with self.assertRaises(ValueError):dash.migrate_authorized_strategy(self.path,self.target,bot.Config,START)
+        self.assertEqual(self.store.load(),before)
+    def test_position_size_uses_new_budget_and_stop_risk(self):
+        dash.migrate_authorized_strategy(self.path,self.target,bot.Config,START)
+        q=bot.DemoQuotes();engine=bot.Engine(self.store,self.target,q)
+        for i in range(7):
+            q.price=bot.decimal(1+i*.005)
+            engine.step([bot.demo_snapshot(START+i*60,str(q.price))],START+i*60)
+        positions=self.store.load()['positions']
+        self.assertEqual(len(positions),1)
+        position=next(iter(positions.values()))
+        self.assertEqual(position['cost'],250000000)
+        self.assertEqual(position['cost']*self.target.stop_bps//10000,30000000)
+        q.price=bot.decimal('0.70')
+        engine.step([bot.demo_snapshot(START+420,'0.70')],START+420)
+        self.assertEqual(self.store.load()['positions'],{})
+        sell=json.loads(self.store.db.execute("SELECT body FROM events WHERE kind='SELL'").fetchone()[0])
+        self.assertEqual(sell['reason'],'stop_loss')

@@ -1,4 +1,13 @@
 {
   "initial_cash": 1000000000,
-  "monthly_operating_cost": 250000
+  "monthly_operating_cost": 250000,
+  "max_position": 250000000,
+  "max_positions": 3,
+  "reserve": 200000000,
+  "risk_per_trade": 30000000,
+  "daily_loss": 100000000,
+  "total_loss": 250000000,
+  "max_daily_entries": 12,
+  "stop_bps": 1200,
+  "take_profit_bps": 2400
 }
