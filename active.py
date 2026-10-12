@@ -17,7 +17,7 @@ PROFILE = dict(id='active', name='Actief', strategy='Momentum + uitbraak',
                trailing_activation_bps=300, trailing_distance_bps=150,
                history_retention_seconds=1800, raw_retention_hours=24,
                description='3-minutenmomentum met koopdruk en uitbraak/voortzetting; 30-secondenbevestiging. '
-                           'Geen verplichte tijdsverkoop: na 15 minuten maximaal 2% verlies en een '
+                           'Geen verplichte tijdsverkoop: na 15 minuten een verliesgrens van 2% en een '
                            'meelopende stop op 2% afstand. Vanaf +3% blijft de trailing stop 1,5%. '
                            'Instapmomentum moet minstens 1,5 maal de geschatte retourkosten bedragen. '
                            'Experimenteel: nog geen bewezen rendement.')
@@ -128,6 +128,42 @@ def activate_revision(store, now):
         store.event(now, 'STRATEGY_CHANGE', previous_policy=previous,
                     current=state['config'], policy=PROFILE,
                     description=PROFILE['description'], baseline=state['active_revision'])
+
+
+def restart_authorized_test(store, now):
+    """One-time owner-requested funding and daily-entry reset, 2026-10-12.
+
+    Preserve the ledger and historical losses. Funding is not trading profit.
+    Never liquidate or erase a position to apply a reset.
+    """
+    reset_id = 'owner-request-2026-10-12-1117'
+    with store.db:
+        state = store.load()
+        if state.get('test_restart', {}).get('id') == reset_id:
+            return False
+        if state['mode'] != 'paper' or state['positions'] or state['unpriced']:
+            return False
+        previous = state['cash']
+        target = 1000*USD
+        delta = target-previous
+        baseline = dict(id=reset_id, ts=now, equity=target-state['operating_cost'],
+                        previous_cash=previous, cash=target, funding_delta=delta,
+                        realized=state['realized'], closed=state['closed'],
+                        previous_entries_today=state['entries_today'])
+        state['cash'] = target
+        state['cash_adjustments'] = state.get('cash_adjustments', 0)+delta
+        for key in ('equity', 'last_priced_equity', 'day_start'):
+            state[key] = target-state['operating_cost']
+        state.update(entries_today=0, day_halted=False, halted=False,
+                     pending={}, cooldowns={}, test_restart=baseline)
+        state['dashboard_revision'] = state.get('dashboard_revision', 0)+1
+        store.save(state)
+        store.event(now, 'CAPITAL_CHANGE', previous=previous, current=target,
+                    delta=delta, reason='user_requested_paper_test_restart',
+                    description='Testherstart: saldo naar 1.000 USDC en aankoopteller naar 0. '
+                                'Fictieve bijstorting is geen handelswinst; eerdere resultaten blijven bewaard.',
+                    baseline=baseline)
+        return True
 
 
 

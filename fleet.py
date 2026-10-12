@@ -12,7 +12,7 @@ import time
 import urllib.parse
 import bot
 import dashboard_state as dashboard
-from active import ActiveEngine, ActiveMarket, LIMITS as ACTIVE_LIMITS, PROFILE, activate_revision
+from active import ActiveEngine, ActiveMarket, LIMITS as ACTIVE_LIMITS, PROFILE, activate_revision, restart_authorized_test
 
 
 class SharedHttp(bot.Http):
@@ -93,6 +93,7 @@ class Experiment:
         self.disabled = False
         if name == 'active':
             activate_revision(self.store, int(time.time()))
+            restart_authorized_test(self.store, int(time.time()))
         with self.store.db:
             self.store.event(int(time.time()), 'RUN_START', version=bot.VERSION, mode='paper', profile=name)
 

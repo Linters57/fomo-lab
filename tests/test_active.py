@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import bot
 import dashboard_state as dashboard
-from active import ActiveEngine, ActiveMarket, LIMITS, PROFILE, activate_revision
+from active import ActiveEngine, ActiveMarket, LIMITS, PROFILE, activate_revision, restart_authorized_test
 from fleet import Experiment, SharedHttp, prune_active
 START=1791550000
 ROOT=Path(__file__).resolve().parents[1]
@@ -127,6 +127,37 @@ class ActiveTests(unittest.TestCase):
         activate_revision(self.store,START+1)
         self.assertEqual(self.store.load(),after)
         self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM events WHERE kind='STRATEGY_CHANGE'").fetchone()[0],1)
+
+    def test_requested_restart_funds_once_resets_entries_preserves_history(self):
+        s=self.store.load();s.update(cash=721*bot.USD,equity=721*bot.USD,
+            last_priced_equity=721*bot.USD,realized=-279*bot.USD,closed=178,
+            entries_today=48,halted=True,day_halted=True)
+        with self.store.db:
+            self.store.save(s);self.store.event(START-1,'SELL',pnl=-279*bot.USD)
+        self.assertTrue(restart_authorized_test(self.store,START))
+        n=self.store.load()
+        self.assertEqual(n['cash'],1000*bot.USD)
+        self.assertEqual(n['day_start'],1000*bot.USD)
+        self.assertEqual(n['entries_today'],0)
+        self.assertFalse(n['halted']);self.assertFalse(n['day_halted'])
+        self.assertEqual(n['cash_adjustments'],279*bot.USD)
+        self.assertEqual(n['realized'],s['realized']);self.assertEqual(n['closed'],178)
+        self.assertEqual(n['equity']-self.c.initial_cash-n['cash_adjustments'],s['realized'])
+        self.assertFalse(restart_authorized_test(self.store,START+1))
+        self.assertEqual(self.store.load(),n)
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM events WHERE kind='SELL'").fetchone()[0],1)
+        p=self.path/'reset-dashboard.json'
+        dashboard.export(self.store,p,bot.status,START,limits=LIMITS,profile=PROFILE)
+        exported=json.loads(p.read_text())
+        self.assertEqual(exported['test_restart']['cash'],1000*bot.USD)
+        self.assertEqual(exported['entries_today'],0)
+        self.assertEqual(exported['cash_adjustments'],279*bot.USD)
+
+    def test_requested_restart_never_erases_open_position(self):
+        s=self.store.load();s['positions']={bot.SOL:{'cost':100*bot.USD}}
+        with self.store.db:self.store.save(s)
+        self.assertFalse(restart_authorized_test(self.store,START))
+        self.assertEqual(self.store.load(),s)
 
     def test_no_falling_entry_or_future_history(self):
         h=[[START+i*30,str(1+i*.001),'synthetic-pool'] for i in range(7)]
