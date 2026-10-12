@@ -24,7 +24,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-VERSION = '0.3.0'
+VERSION = '0.3.1'
 USD = 1_000_000
 USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 SOL = 'So11111111111111111111111111111111111111112'
@@ -504,6 +504,9 @@ class Engine:
     def pending_items(self, pending, current):
         return sorted(pending.items())
 
+    def entry_cost_guard(self, snap, history, budget, drag):
+        return None
+
     def exit_reason(self, pos, net, ts):
         ret_bps = (net - pos['cost']) * 10000 // pos['cost']
         return ('stop_loss' if ret_bps <= -self.c.stop_bps else
@@ -635,6 +638,9 @@ class Engine:
                         raise DataError('roundtrip_cost_or_inconsistent_quotes')
                     if drag >= budget * c.stop_bps // 10000:
                         raise DataError('costs_consume_stop_budget')
+                    cost_reason = self.entry_cost_guard(snap, s['history'].get(mint, []), budget, drag)
+                    if cost_reason:
+                        raise DataError(cost_reason)
                 except DataError as exc:
                     db.event(ts, 'REJECT', mint=mint, reason=str(exc))
                     continue

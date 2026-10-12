@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import bot
 import dashboard_state as dashboard
-from active import ActiveEngine, ActiveMarket, LIMITS, PROFILE
+from active import ActiveEngine, ActiveMarket, LIMITS, PROFILE, activate_revision
 from fleet import Experiment, SharedHttp, prune_active
 START=1791550000
 ROOT=Path(__file__).resolve().parents[1]
@@ -31,7 +31,7 @@ class ActiveTests(unittest.TestCase):
         self.q=TightQuotes();self.engine=ActiveEngine(self.store,self.c,self.q)
     def tearDown(self):self.store.close();self.temp.cleanup()
     def sample(self,i):
-        price=str(1+i*.001);self.q.price=bot.decimal(price)
+        price=str(1+i*.004);self.q.price=bot.decimal(price)
         return bot.demo_snapshot(START+i*30,price)
     def warm(self):
         for i in range(7):self.engine.step([self.sample(i)],START+i*30)
@@ -60,9 +60,74 @@ class ActiveTests(unittest.TestCase):
         p={'cost':100*bot.USD,'opened':START}
         self.assertIsNone(self.engine.exit_reason(p,104*bot.USD,START+30))
         self.assertEqual(self.engine.exit_reason(p,102*bot.USD,START+60),'trailing_stop')
-        self.assertEqual(self.engine.exit_reason(p,95*bot.USD,START+60),'stop_loss')
+        self.assertEqual(self.engine.exit_reason({'cost':100*bot.USD,'opened':START},95*bot.USD,START+60),'stop_loss')
         self.assertEqual(self.engine.exit_reason(p,109*bot.USD,START+60),'take_profit')
-        self.assertEqual(self.engine.exit_reason({'cost':100*bot.USD,'opened':START},100*bot.USD,START+900),'time_exit')
+        self.assertIsNone(self.engine.exit_reason({'cost':100*bot.USD,'opened':START},100*bot.USD,START+900))
+    def test_aged_stop_boundary_ratchet_and_restart(self):
+        p={'cost':100*bot.USD,'opened':START}
+        self.assertIsNone(self.engine.exit_reason(p,97*bot.USD,START+899))
+        self.assertEqual(self.engine.exit_reason(p,97*bot.USD,START+900),'aged_stop')
+        p={'cost':100*bot.USD,'opened':START}
+        self.assertIsNone(self.engine.exit_reason(p,99*bot.USD,START+900))
+        self.assertEqual(p['stop_floor'],98*bot.USD)
+        self.assertIsNone(self.engine.exit_reason(p,102*bot.USD,START+930))
+        floor=p['stop_floor']
+        self.assertGreater(floor,99*bot.USD)
+        # Position fields survive SQLite serialization and a reconstructed engine.
+        state=self.store.load();state['positions']={bot.SOL:p}
+        with self.store.db:self.store.save(state)
+        p=self.store.load()['positions'][bot.SOL]
+        engine=ActiveEngine(self.store,self.c,self.q)
+        self.assertIsNone(engine.exit_reason(p,101*bot.USD,START+960))
+        self.assertEqual(p['stop_floor'],floor)
+        self.assertEqual(engine.exit_reason(p,floor,START+990),'aged_stop')
+        p={'cost':100*bot.USD,'opened':START}
+        self.assertIsNone(engine.exit_reason(p,100*bot.USD,START+86400))
+
+    def test_cost_guard_rejects_weak_signal_against_actual_quotes(self):
+        h=[[START,'1','synthetic-pool']]
+        self.assertEqual(self.engine.entry_cost_guard(bot.demo_snapshot(START+180,'1.006'),h,200*bot.USD,2*bot.USD),'momentum_too_small_for_costs')
+        self.assertIsNone(self.engine.entry_cost_guard(bot.demo_snapshot(START+180,'1.015'),h,200*bot.USD,2*bot.USD))
+        for i in range(8):
+            price=str(1+i*.001);self.q.price=bot.decimal(price)
+            self.engine.step([bot.demo_snapshot(START+i*30,price)],START+i*30)
+        self.assertEqual(self.store.load()['positions'],{})
+        rejects=[json.loads(r[0])['reason'] for r in self.store.db.execute("SELECT body FROM events WHERE kind='REJECT'")]
+        self.assertIn('momentum_too_small_for_costs',rejects)
+
+    def test_engine_holds_past_time_and_exits_only_on_priced_stop(self):
+        state=self.store.load()
+        state['cash']-=100*bot.USD
+        state['positions']={bot.SOL:dict(cost=100*bot.USD,quantity=100*bot.USD,opened=START,symbol='TEST')}
+        with self.store.db:self.store.save(state)
+        self.q.price=bot.decimal('1')
+        self.engine.step([],START+900)
+        self.assertIn(bot.SOL,self.store.load()['positions'])
+        self.assertEqual(self.store.load()['positions'][bot.SOL]['stop_floor'],98*bot.USD)
+        class Missing:
+            def quote(self,*args):raise bot.DataError('missing exit quote')
+        self.engine.quotes=Missing()
+        self.engine.step([],START+930)
+        self.assertIn(bot.SOL,self.store.load()['positions'])
+        self.assertIn(bot.SOL,self.store.load()['unpriced'])
+        self.engine.quotes=self.q;self.q.price=bot.decimal('0.98')
+        self.engine.step([],START+960)
+        self.assertEqual(self.store.load()['positions'],{})
+        trade=json.loads(self.store.db.execute("SELECT body FROM events WHERE kind='SELL'").fetchone()[0])
+        self.assertEqual(trade['reason'],'aged_stop')
+
+    def test_revision_keeps_losses_halts_and_is_idempotent(self):
+        s=self.store.load();s.update(cash=721*bot.USD,equity=721*bot.USD,realized=-279*bot.USD,closed=178,halted=True,day_halted=True)
+        with self.store.db:self.store.save(s)
+        activate_revision(self.store,START)
+        after=self.store.load()
+        for key in ('cash','equity','realized','closed','halted','day_halted'):
+            self.assertEqual(after[key],s[key])
+        self.assertEqual(after['active_revision']['equity'],721*bot.USD)
+        activate_revision(self.store,START+1)
+        self.assertEqual(self.store.load(),after)
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM events WHERE kind='STRATEGY_CHANGE'").fetchone()[0],1)
+
     def test_no_falling_entry_or_future_history(self):
         h=[[START+i*30,str(1+i*.001),'synthetic-pool'] for i in range(7)]
         self.assertEqual(self.engine.gate(bot.demo_snapshot(START+180,'1.003'),h,START+180),'below_recent_high')
@@ -117,7 +182,7 @@ class MarketTests(unittest.TestCase):
             root=Path(t);h=SharedHttp(threading.Event());s=bot.SolanaSafety(h)
             a=Experiment(root,'momentum',ROOT/'shared-config.json',h,s,threading.Event(),stack)
             b=Experiment(root,'active',ROOT/'active-config.json',h,s,threading.Event(),stack)
-            p=b.root/'dashboard-command.json';p.write_text(json.dumps(dict(id='pause',expires=START+60,revision=0,action='pause',paused=True)))
+            p=b.root/'dashboard-command.json';p.write_text(json.dumps(dict(id='pause',expires=START+60,revision=b.store.load().get('dashboard_revision',0),action='pause',paused=True)))
             dashboard.apply_command(b.store,b.engine,p,bot.Config,START,limits=b.limits)
             self.assertTrue(b.store.load()['dashboard_paused']);self.assertFalse(a.store.load().get('dashboard_paused',False))
             self.assertEqual(a.store.load()['cash'],1000000000);self.assertEqual(b.store.load()['cash'],1000000000)

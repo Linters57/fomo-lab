@@ -12,7 +12,7 @@ import time
 import urllib.parse
 import bot
 import dashboard_state as dashboard
-from active import ActiveEngine, ActiveMarket, LIMITS as ACTIVE_LIMITS, PROFILE
+from active import ActiveEngine, ActiveMarket, LIMITS as ACTIVE_LIMITS, PROFILE, activate_revision
 
 
 class SharedHttp(bot.Http):
@@ -91,6 +91,8 @@ class Experiment:
         self.cursor = self.store.db.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()[0]
         self.due, self.failures, self.pruned_at = 0, 0, 0
         self.disabled = False
+        if name == 'active':
+            activate_revision(self.store, int(time.time()))
         with self.store.db:
             self.store.event(int(time.time()), 'RUN_START', version=bot.VERSION, mode='paper', profile=name)
 

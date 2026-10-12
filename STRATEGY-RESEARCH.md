@@ -73,6 +73,8 @@ audit. Token-2022 is deliberately unsupported. Liquidity >=$100k, pool age >=6h.
   No more than 1.5% absolute movement from the prior signal.
 - Check at most two prior signals per cycle, ranked by current buying share then
   volume, to bound RPC and quote work. Other candidates continue to be observed.
+- The observed three-minute price return must be at least 1.5 times the modeled
+  roundtrip drag as a fraction of entry cost. This is a cost filter, not a forecast.
 - Hypothetical buy and immediate sell-back quotes must have combined modeled drag
   <=1.5% (including per-side haircut and fixed costs). Quote TTL 15 seconds.
 - Maximum $200 cost per position, 4 positions, $100 reserve, $8 planned stop-risk
@@ -81,9 +83,12 @@ audit. Token-2022 is deliberately unsupported. Liquidity >=$100k, pool age >=6h.
 
 ### Exits and losses
 
-Net estimated proceeds after modeled costs trigger 4% stop, 8% profit target or
-15-minute time exit. From a peak net gain of 3%, a 1.5% decline from that peak triggers
-a trailing exit. Peak is persisted in the position. Stops are observed at polls,
+Revision 2026-10-12: net estimated proceeds after modeled costs trigger the initial
+4% stop or 8% profit target. There is no forced time exit. After 15 minutes, the
+stop tightens to the higher of 98% of entry cost and 98% of the highest net exit
+value observed from that point onward. From a lifetime peak net gain of 3%, the
+existing 1.5% trailing distance applies if tighter. The effective floor never
+moves down. Peaks and floor are persisted in the position. Stops are observed at polls,
 not guaranteed prices; gaps or missing routes can exceed any threshold.
 
 New entries halt at $150 day loss or $350 loss versus starting capital. Exit checks
@@ -120,3 +125,8 @@ Live discovery and resource checks after deployment are required before declarin
 successful launch. Local keyless API probes returned HTTP 403; no bypass attempted.
 The existing Render process already accesses Jupiter; production checks establish
 whether the added documented endpoints are available there.
+
+## Follow-up review
+
+See REVIEW-2026-10-12.md for observed performance, the authorized adaptive-exit
+revision, preservation of the original ledger and forward-test limitations.

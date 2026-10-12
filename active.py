@@ -12,14 +12,32 @@ from bot import Config, Engine, JupiterTokens, DataError, TOKEN_PROGRAM, USD, de
 LIMITS = {'max_position': (10*USD, 250*USD), 'max_positions': (1, 4),
           'stop_bps': (200, 1200), 'take_profit_bps': (300, 3000)}
 PROFILE = dict(id='active', name='Actief', strategy='Momentum + uitbraak',
+               revision='adaptive-exits-v2', timed_exit=False,
+               aged_stop_bps=200, aged_trailing_bps=200, cost_momentum_ratio=1.5,
                trailing_activation_bps=300, trailing_distance_bps=150,
                history_retention_seconds=1800, raw_retention_hours=24,
                description='3-minutenmomentum met koopdruk en uitbraak/voortzetting; 30-secondenbevestiging. '
-                           'Stop, winstdoel, trailing stop en maximaal 15 minuten houdtijd. '
+                           'Geen verplichte tijdsverkoop: na 15 minuten maximaal 2% verlies en een '
+                           'meelopende stop op 2% afstand. Vanaf +3% blijft de trailing stop 1,5%. '
+                           'Instapmomentum moet minstens 1,5 maal de geschatte retourkosten bedragen. '
                            'Experimenteel: nog geen bewezen rendement.')
 
 
 class ActiveEngine(Engine):
+    def observation_window(self, snap, history):
+        past = [h for h in history if h[0] < snap.observed]
+        past.append([snap.observed, snap.price, snap.pair])
+        anchors = [i for i, h in enumerate(past) if h[0] <= snap.observed-self.c.warmup_seconds]
+        return past[anchors[-1]:] if anchors else past
+
+    def entry_cost_guard(self, snap, history, budget, drag):
+        window = self.observation_window(snap, history)
+        momentum = decimal(snap.price)/decimal(window[0][1])-1
+        # Observed momentum is a filter, never a prediction of the next return.
+        if momentum*budget < decimal('1.5')*drag:
+            return 'momentum_too_small_for_costs'
+        return None
+
     def pending_items(self, pending, current):
         # Bound entry quote work; rank previous signals by current buying share/volume.
         def rank(item):
@@ -40,10 +58,7 @@ class ActiveEngine(Engine):
     def gate(self, snap, history, ts):
         c = self.c
         # Only real, distinct provider observations known at decision time.
-        past = [h for h in history if h[0] < snap.observed]
-        past.append([snap.observed, snap.price, snap.pair])
-        anchors = [i for i, h in enumerate(past) if h[0] <= snap.observed-c.warmup_seconds]
-        window = past[anchors[-1]:] if anchors else past
+        window = self.observation_window(snap, history)
         reason = super().gate(snap, window, ts)
         if reason:
             return reason
@@ -72,14 +87,47 @@ class ActiveEngine(Engine):
         return None
 
     def exit_reason(self, pos, net, ts):
-        reason = super().exit_reason(pos, net, ts)
+        # Net proceeds already include modeled sell costs. A clock alone never sells.
+        cost = pos['cost']
         pos['peak_exit_value'] = max(net, pos.get('peak_exit_value', pos['cost']))
         peak = pos['peak_exit_value']
-        if reason:
-            return reason
-        if peak*10000 >= pos['cost']*10300 and net*10000 <= peak*9850:
-            return 'trailing_stop'
+        floor = cost*(10000-self.c.stop_bps)//10000
+        label = 'stop_loss'
+        if ts-pos['opened'] >= self.c.max_hold_seconds:
+            # Start this peak at the first priced observation after the threshold;
+            # do not treat an unseen pre-threshold high as an executable order.
+            pos['aged_peak_exit_value'] = max(net, pos.get('aged_peak_exit_value', net))
+            aged_floor = max(cost*9800//10000, pos['aged_peak_exit_value']*9800//10000)
+            if aged_floor >= floor:
+                floor, label = aged_floor, 'aged_stop'
+        if peak*10000 >= cost*10300 and peak*9850//10000 > floor:
+            floor, label = peak*9850//10000, 'trailing_stop'
+        if pos.get('stop_floor', 0) > floor:
+            floor, label = pos['stop_floor'], pos['stop_floor_reason']
+        pos['stop_floor'], pos['stop_floor_reason'] = floor, label
+        if net <= floor:
+            return label
+        if (net-cost)*10000 >= cost*self.c.take_profit_bps:
+            return 'take_profit'
         return None
+
+
+def activate_revision(store, now):
+    """Record the authorized policy change once without resetting accounting/halts."""
+    with store.db:
+        state = store.load()
+        if state.get('active_revision', {}).get('id') == PROFILE['revision']:
+            return
+        previous = state.get('active_revision', {}).get('id', 'fixed-time-v1')
+        state['active_revision'] = dict(id=PROFILE['revision'], ts=now,
+                                       equity=state['equity'], realized=state['realized'],
+                                       closed=state['closed'])
+        state['pending'] = {}
+        state['dashboard_revision'] = state.get('dashboard_revision', 0)+1
+        store.save(state)
+        store.event(now, 'STRATEGY_CHANGE', previous_policy=previous,
+                    current=state['config'], policy=PROFILE,
+                    description=PROFILE['description'], baseline=state['active_revision'])
 
 
 
