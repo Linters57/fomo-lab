@@ -12,6 +12,7 @@ import time
 import urllib.parse
 import bot
 import dashboard_state as dashboard
+from momentum import MomentumEngine, MomentumMarket, PROFILE as MOMENTUM_PROFILE, activate as activate_momentum
 from scalping import ScalpEngine as ActiveEngine, ScalpMarket as ActiveMarket, LIMITS as ACTIVE_LIMITS, PROFILE, migrate, activate_new
 
 
@@ -72,9 +73,7 @@ class Experiment:
         stack.enter_context(bot.ProcessLock(path))
         c = bot.Config.load(config_path)
         self.limits = dashboard.LIMITS if name == 'momentum' else ACTIVE_LIMITS
-        self.profile = (dict(id='momentum', name='Momentum', strategy='5-minutenmomentum',
-                            description='Het bestaande experiment met 5-minutenmomentum en 60-secondenbevestiging.')
-                        if name == 'momentum' else PROFILE)
+        self.profile = MOMENTUM_PROFILE if name == 'momentum' else PROFILE
         if name == 'momentum':
             dashboard.migrate_authorized_strategy(path, c, bot.Config)
         if name == 'active':
@@ -87,10 +86,10 @@ class Experiment:
         self.store.db.execute('PRAGMA journal_size_limit=4194304')
         if name == 'active':
             self.store.db.execute('PRAGMA max_page_count=49152') # 192 MiB, including retained audit
-        self.engine = (bot.Engine if name == 'momentum' else ActiveEngine)(
+        self.engine = (MomentumEngine if name == 'momentum' else ActiveEngine)(
             self.store, c, bot.Jupiter(http), safety, clock=lambda: int(time.time()),
             entries_allowed=lambda: not stop.is_set() and shutil.disk_usage(root).free > 128*1024*1024)
-        self.market = bot.JupiterTokens(c, http) if name == 'momentum' else ActiveMarket(c, http)
+        self.market = MomentumMarket(c, http) if name == 'momentum' else ActiveMarket(c, http)
         if name == 'active':
             self.engine.candles = self.market.candles
             history = self.store.load()['history']
@@ -98,6 +97,8 @@ class Experiment:
         self.cursor = self.store.db.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()[0]
         self.due, self.failures, self.pruned_at = 0, 0, 0
         self.disabled = False
+        if name == 'momentum':
+            activate_momentum(self.store, int(time.time()))
         if name == 'active':
             activate_new(self.store, int(time.time()))
         with self.store.db:

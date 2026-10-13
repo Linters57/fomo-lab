@@ -516,6 +516,9 @@ class Engine:
     def on_close(self, state, mint, pos, pnl, ts):
         pass
 
+    def partial_exit(self, state, mint, pos, net, ts):
+        return None
+
     def exit_reason(self, pos, net, ts):
         ret_bps = (net - pos['cost']) * 10000 // pos['cost']
         return ('stop_loss' if ret_bps <= -self.c.stop_bps else
@@ -570,13 +573,22 @@ class Engine:
                     db.event(ts, 'UNPRICED', mint=mint, reason=str(exc))
                     continue
                 marks[mint] = net
+                try:
+                    partial_mark = self.partial_exit(s, mint, pos, net, ts)
+                except DataError as exc:
+                    db.event(ts, 'PARTIAL_EXIT_REJECT', mint=mint, reason=str(exc))
+                    partial_mark = None
+                if partial_mark is not None:
+                    marks[mint] = partial_mark
+                    continue
                 reason = self.exit_reason(pos, net, ts)
                 if reason:
                     pnl = net - pos['cost']
                     s['cash'] += net
                     s['realized'] += pnl
                     s['closed'] += 1
-                    s['wins'] += int(pnl > 0)
+                    trade_pnl = pnl + pos.get('realized_partial', 0)
+                    s['wins'] += int(trade_pnl > 0)
                     del s['positions'][mint]
                     del marks[mint]
                     s['cooldowns'][mint] = ts + c.cooldown_seconds
@@ -585,7 +597,9 @@ class Engine:
                     db.event(ts, 'SELL', mint=mint, symbol=pos['symbol'], quantity=pos['quantity'],
                              proceeds=net, pnl=pnl, reason=reason, quote=asdict(q),
                              strategy=pos.get('strategy'), opened=pos['opened'],
-                             cost=pos['cost'])
+                             cost=pos['cost'], partial=False, closed=True,
+                             trade_pnl=trade_pnl, realized_partial=pos.get('realized_partial',0),
+                             trade_id=pos.get('trade_id'))
             # Unpriced positions contribute ZERO to a disclosed lower-bound valuation.
             # They are not magically sold or deleted. Any unpriced holding blocks entries.
             equity = s['cash'] + sum(marks.values()) - s['operating_cost']

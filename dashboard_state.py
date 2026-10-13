@@ -205,7 +205,8 @@ def export(store, path, status_fn, now=None, limits=None, profile=None, max_byte
                    events=recent, trades=trades, curve=curve, capital_adjusted=bool(funding),
                    wins=state['wins'], started=state['started'], limits=LIMITS if limits is None else limits, profile=profile,
                    discovery=scan[0].get("discovery") if scan else None,
-                   strategy_revision=state.get('active_revision'), scalp_results=state.get('scalp_results'),
+                   strategy_revision=state.get('active_revision') if profile and profile.get('id')=='active' else state.get('momentum_revision'),
+                   momentum_results=state.get('momentum_results'), scalp_results=state.get('scalp_results'),
                    test_restart=state.get('test_restart'), cash_adjustments=state.get('cash_adjustments', 0),
                    entries_today=state['entries_today'],
                    total_events=store.db.execute('SELECT COUNT(*) FROM events').fetchone()[0])
