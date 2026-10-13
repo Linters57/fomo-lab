@@ -12,7 +12,7 @@ import time
 import urllib.parse
 import bot
 import dashboard_state as dashboard
-from active import ActiveEngine, ActiveMarket, LIMITS as ACTIVE_LIMITS, PROFILE, activate_revision, restart_authorized_test
+from scalping import ScalpEngine as ActiveEngine, ScalpMarket as ActiveMarket, LIMITS as ACTIVE_LIMITS, PROFILE, migrate, activate_new
 
 
 class SharedHttp(bot.Http):
@@ -33,6 +33,10 @@ class SharedHttp(bot.Http):
         # Sharing category reads avoids duplicate requests; no quote caching.
         if cacheable and cached and now-cached[0] < 20:
             return json.loads(cached[1])
+        if urllib.parse.urlparse(url).netloc == 'api.geckoterminal.com':
+            if self.stop.is_set():
+                raise bot.DataError('shutdown')
+            return (self.transport or super().json)(url, headers, payload)
         wait = max(0, self.next_request-now)
         if self.stop.wait(wait):
             raise bot.DataError('shutdown')
@@ -73,6 +77,8 @@ class Experiment:
                         if name == 'momentum' else PROFILE)
         if name == 'momentum':
             dashboard.migrate_authorized_strategy(path, c, bot.Config)
+        if name == 'active':
+            migrate(path, c, int(time.time()))
         c = dashboard.restore_config(path, c, bot.Config, self.limits)
         if name == 'momentum':
             dashboard.migrate_authorized_capital(path, c)
@@ -86,14 +92,14 @@ class Experiment:
             entries_allowed=lambda: not stop.is_set() and shutil.disk_usage(root).free > 128*1024*1024)
         self.market = bot.JupiterTokens(c, http) if name == 'momentum' else ActiveMarket(c, http)
         if name == 'active':
+            self.engine.candles = self.market.candles
             history = self.store.load()['history']
             self.market.watch = {m: h[-1][0]+1800 for m, h in sorted(history.items(), key=lambda x: -x[1][-1][0])[:c.max_candidates] if h and h[-1][0]+1800 > time.time()}
         self.cursor = self.store.db.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()[0]
         self.due, self.failures, self.pruned_at = 0, 0, 0
         self.disabled = False
         if name == 'active':
-            activate_revision(self.store, int(time.time()))
-            restart_authorized_test(self.store, int(time.time()))
+            activate_new(self.store, int(time.time()))
         with self.store.db:
             self.store.event(int(time.time()), 'RUN_START', version=bot.VERSION, mode='paper', profile=name)
 

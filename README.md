@@ -162,3 +162,10 @@ De gedeelde runner voert nu Momentum en Actief uit met onafhankelijke databases,
 saldi, opdrachten en dashboardtabs. Zie [STRATEGY-RESEARCH.md](STRATEGY-RESEARCH.md)
 voor bronnen, alle criteria, kosten en bewaartermijnen. Instellingen voor Actief
 staan in `active-config.json`. Het dashboard biedt ook een vergelijking.
+
+## Actief: nieuwe paperproef (13 oktober 2026)
+
+`fleet.py` gebruikt nu `scalping.py` voor pullback scalping. Exacte regels, databron,
+beperkingen en overgang staan in [SCALPING-2026-10-13.md](SCALPING-2026-10-13.md).
+`active.py` blijft uitsluitend behouden voor de verkoopregels van oude posities
+en regressietests. Momentum behoudt zijn bestaande handelsregels.

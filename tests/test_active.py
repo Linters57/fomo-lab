@@ -27,7 +27,7 @@ class TightQuotes(bot.DemoQuotes):
 class ActiveTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.path=Path(self.temp.name)
-        self.c=bot.Config.load(ROOT/'active-config.json');self.store=bot.Store(self.path/'paper.sqlite',self.c,'paper')
+        self.c=bot.Config.load(ROOT/'tests/legacy-active-config.json');self.store=bot.Store(self.path/'paper.sqlite',self.c,'paper')
         self.q=TightQuotes();self.engine=ActiveEngine(self.store,self.c,self.q)
     def tearDown(self):self.store.close();self.temp.cleanup()
     def sample(self,i):
@@ -191,7 +191,7 @@ class MarketTests(unittest.TestCase):
                 calls.append(url)
                 if '/search?' in url:return [row(now[0])]
                 return [row()] if now[0]==START else []
-        m=ActiveMarket(bot.Config.load(ROOT/'active-config.json'),HTTP(),lambda:now[0])
+        m=ActiveMarket(bot.Config.load(ROOT/'tests/legacy-active-config.json'),HTTP(),lambda:now[0])
         self.assertEqual(len(m.collect()),1);self.assertEqual(len(calls),4)
         now[0]+=30;self.assertEqual(len(m.collect()),1);self.assertEqual(len(calls),5)
         now[0]+=300;self.assertEqual(len(m.collect()),1);self.assertIn(bot.SOL,m.watch)

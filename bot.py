@@ -507,6 +507,15 @@ class Engine:
     def entry_cost_guard(self, snap, history, budget, drag):
         return None
 
+    def position_fields(self, snap, budget, proceeds, ts):
+        return {}
+
+    def on_open(self, state, mint, pos):
+        pass
+
+    def on_close(self, state, mint, pos, pnl, ts):
+        pass
+
     def exit_reason(self, pos, net, ts):
         ret_bps = (net - pos['cost']) * 10000 // pos['cost']
         return ('stop_loss' if ret_bps <= -self.c.stop_bps else
@@ -571,9 +580,12 @@ class Engine:
                     del s['positions'][mint]
                     del marks[mint]
                     s['cooldowns'][mint] = ts + c.cooldown_seconds
+                    self.on_close(s, mint, pos, pnl, ts)
                     closed_this_cycle.add(mint)
                     db.event(ts, 'SELL', mint=mint, symbol=pos['symbol'], quantity=pos['quantity'],
-                             proceeds=net, pnl=pnl, reason=reason, quote=asdict(q))
+                             proceeds=net, pnl=pnl, reason=reason, quote=asdict(q),
+                             strategy=pos.get('strategy'), opened=pos['opened'],
+                             cost=pos['cost'])
             # Unpriced positions contribute ZERO to a disclosed lower-bound valuation.
             # They are not magically sold or deleted. Any unpriced holding blocks entries.
             equity = s['cash'] + sum(marks.values()) - s['operating_cost']
@@ -648,9 +660,11 @@ class Engine:
                 if reason:
                     db.event(ts, 'REJECT', mint=mint, reason=reason)
                     continue
+                fields = self.position_fields(snap, budget, proceeds, ts)
                 s['cash'] -= budget
                 s['positions'][mint] = {'quantity': quantity, 'cost': budget, 'opened': ts,
-                                        'symbol': snap.symbol}
+                                        'symbol': snap.symbol, **fields}
+                self.on_open(s, mint, s['positions'][mint])
                 if mint not in s['accounts']:
                     s['accounts'].append(mint)
                 s['entries_today'] += 1
@@ -665,7 +679,9 @@ class Engine:
                     global_block = global_block or 'daily_loss_limit'
                 db.event(ts, 'BUY', mint=mint, symbol=snap.symbol, quantity=quantity,
                          cost=budget, modeled_setup=setup, roundtrip_drag=drag,
-                         signal_ts=pending['ts'], quote=asdict(buy_q), exit_quote=asdict(sell_q))
+                         signal_ts=pending['ts'], quote=asdict(buy_q), exit_quote=asdict(sell_q),
+                         strategy=fields.get('strategy'), setup=fields.get('setup'),
+                         stop_floor=fields.get('stop_floor'))
             scan_reasons = {}
             for mint, snap in sorted(current.items()):
                 if (global_block or mint in s['positions'] or mint in closed_this_cycle
