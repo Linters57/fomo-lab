@@ -516,6 +516,9 @@ class Engine:
     def on_close(self, state, mint, pos, pnl, ts):
         pass
 
+    def on_scan(self, state, reasons, ts):
+        pass
+
     def partial_exit(self, state, mint, pos, net, ts):
         return None
 
@@ -596,7 +599,7 @@ class Engine:
                     closed_this_cycle.add(mint)
                     db.event(ts, 'SELL', mint=mint, symbol=pos['symbol'], quantity=pos['quantity'],
                              proceeds=net, pnl=pnl, reason=reason, quote=asdict(q),
-                             strategy=pos.get('strategy'), entry_type=pos.get('entry_type'), opened=pos['opened'],
+                             strategy=pos.get('strategy'), setup_type=pos.get('setup_type'), opened=pos['opened'],
                              cost=pos['cost'], partial=False, closed=True,
                              trade_pnl=trade_pnl, realized_partial=pos.get('realized_partial',0),
                              trade_id=pos.get('trade_id'))
@@ -694,7 +697,7 @@ class Engine:
                 db.event(ts, 'BUY', mint=mint, symbol=snap.symbol, quantity=quantity,
                          cost=budget, modeled_setup=setup, roundtrip_drag=drag,
                          signal_ts=pending['ts'], quote=asdict(buy_q), exit_quote=asdict(sell_q),
-                         strategy=fields.get('strategy'), setup=fields.get('setup'),
+                         strategy=fields.get('strategy'), setup_type=fields.get('setup_type'), setup=fields.get('setup'),
                          stop_floor=fields.get('stop_floor'))
             scan_reasons = {}
             for mint, snap in sorted(current.items()):
@@ -710,6 +713,7 @@ class Engine:
                 if not reason:
                     s['pending'][mint] = {'ts': ts, 'price': snap.price, 'observed': snap.observed}
                     db.event(ts, 'SIGNAL', mint=mint, symbol=snap.symbol)
+            self.on_scan(s, scan_reasons, ts)
             db.event(ts, 'SCAN', candidates=len(current), reasons=scan_reasons, discovery=discovery,
                      tokens=[{**asdict(item), 'reason': scan_reasons[item.mint]}
                              for item in current.values()])

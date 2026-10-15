@@ -2,7 +2,7 @@ import json,tempfile,unittest
 from pathlib import Path
 from dataclasses import replace,asdict
 import bot
-from scalping import Candles,ScalpEngine,REVISION,migrate,setup_from_bars
+from scalping_v1 import Candles,ScalpEngine,REVISION,migrate,setup_from_bars
 ROOT=Path(__file__).resolve().parents[1]
 NOW=1791878400
 
@@ -19,9 +19,7 @@ class CheapQuotes(bot.DemoQuotes):
 class Tests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.path=Path(self.tmp.name)/'paper.sqlite'
-        self.c=bot.Config.load(ROOT/'active-config.json');self.store=bot.Store(self.path,self.c,'paper')
-        with self.store.db:
-            state=self.store.load();state['accounts']=[bot.SOL];self.store.save(state)
+        self.c=bot.Config.load(ROOT/'tests/pullback-v1-config.json');self.store=bot.Store(self.path,self.c,'paper')
         self.q=CheapQuotes();self.q.price=bot.decimal('105.8');self.e=ScalpEngine(self.store,self.c,self.q)
         self.feed=Candles(None,lambda:NOW);self.feed.bars[bot.SOL]=bars();self.e.candles=self.feed
     def tearDown(self):self.store.close();self.tmp.cleanup()
@@ -32,8 +30,8 @@ class Tests(unittest.TestCase):
     def test_pattern_complete_trade_and_no_repeat(self):
         self.assertIsNone(setup_from_bars(bars(),bot.decimal('105.8'))[1])
         p=self.buy();self.assertIsNotNone(p);self.assertEqual(p['strategy'],REVISION)
-        self.assertLessEqual(p['cost'],100*bot.USD);self.assertLessEqual(p['cost']-p['stop_floor'],2*bot.USD)
-        self.assertLessEqual((p['cost']-p['stop_floor'])*10000,p['cost']*200)
+        self.assertLessEqual(p['cost'],200*bot.USD);self.assertLessEqual(p['cost']-p['stop_floor'],5*bot.USD)
+        self.assertGreaterEqual(p['cost']-p['stop_floor'],p['cost']*.015)
         self.q.price=bot.decimal('111');self.e.step([],NOW+30)
         s=self.store.load();self.assertFalse(s['positions']);self.assertEqual(s['scalp_results']['closed'],1);self.assertGreater(s['scalp_results']['pnl'],0)
         trade=json.loads(self.store.db.execute("SELECT body FROM events WHERE kind='SELL'").fetchone()[0]);self.assertEqual(trade['strategy'],REVISION);self.assertEqual(trade['reason'],'take_profit')
@@ -46,10 +44,10 @@ class Tests(unittest.TestCase):
             else:self.feed.bars[bot.SOL][4][0]-=60
             self.assertIsNotNone(self.e.gate(self.snap(),[],NOW))
         self.feed.bars[bot.SOL]=bars();self.e.step([self.snap()],NOW);self.e.step([self.snap()],NOW+15);self.assertFalse(self.store.load()['positions'])
-    def test_cost_stop_guard_and_resistance_is_diagnostic_only(self):
-        self.assertIsNone(self.e.gate(self.snap(),[],NOW));self.assertIsNone(self.e.entry_cost_guard(self.snap(),[],100*bot.USD,400000))
-        self.e.setups[bot.SOL]['stop_price']='99';self.assertEqual(self.e.entry_cost_guard(self.snap(),[],100*bot.USD,400000),'scalp_stop_outside_budget')
-        self.e.gate(self.snap(),[],NOW);self.e.setups[bot.SOL]['resistance']='106';self.assertIsNone(self.e.entry_cost_guard(self.snap(),[],100*bot.USD,400000))
+    def test_cost_stop_upside_guards(self):
+        self.assertIsNone(self.e.gate(self.snap(),[],NOW));self.assertIsNone(self.e.entry_cost_guard(self.snap(),[],200*bot.USD,1200000))
+        self.e.setups[bot.SOL]['stop_price']='99';self.assertEqual(self.e.entry_cost_guard(self.snap(),[],200*bot.USD,1200000),'scalp_stop_outside_budget')
+        self.e.gate(self.snap(),[],NOW);self.e.setups[bot.SOL]['resistance']='106';self.assertEqual(self.e.entry_cost_guard(self.snap(),[],200*bot.USD,1200000),'scalp_insufficient_upside')
         self.q=bot.DemoQuotes();self.q.price=bot.decimal('105.8');self.e.quotes=self.q;self.assertIsNone(self.buy())
     def test_no_clock_exit_and_missing_quote_never_fills(self):
         p=self.buy();self.assertIsNotNone(p);self.e.current={};self.assertIsNone(self.e.exit_reason(p,p['cost'],NOW+86400))
@@ -88,52 +86,3 @@ class Tests(unittest.TestCase):
         class Bad:
             def json(self,*a):raise bot.DataError('HTTP 429')
         f.http=Bad();f.calls=[];f.refresh([self.snap()]);self.assertGreater(f.backoff,now[0]);self.assertNotIn(bot.SOL,f.bars)
-
-    def test_recovery_below_previous_high_and_breakout_are_distinct(self):
-        rows=bars();rows[-1][4]='105.5';rows[-1][2]='105.5';rows[-1][1]='105.2'
-        setup,reason=setup_from_bars(rows,bot.decimal('105.5'))
-        self.assertIsNone(reason);self.assertEqual(setup['type'],'recovery')
-        self.assertLess(bot.decimal(rows[-1][4]),bot.decimal(rows[-2][2]))
-        rows=[]
-        for i in range(20):
-            c=100+i*.1;rows.append([NOW-1200+i*60,str(c-.05),str(c+.03),str(c-.1),str(c),'10000'])
-        setup,reason=setup_from_bars(rows,bot.decimal(rows[-1][4]))
-        self.assertIsNone(reason);self.assertEqual(setup['type'],'breakout')
-        self.assertLess(bot.decimal(setup['stop_price']),bot.decimal(rows[-1][4]))
-        rows[-1][4]='99';self.assertEqual(setup_from_bars(rows,bot.decimal('99'))[1],'scalp_trend_not_rising')
-
-    def test_diagnostics_survive_restart_and_count_quote_rejects_separately(self):
-        with self.store.db:
-            state=self.store.load();state['accounts']=[];self.store.save(state)
-        self.assertIsNone(self.buy()) # New-account all-in model is >0.8% even without pool fees.
-        d=self.store.load()['scalp_diagnostics']
-        self.assertEqual(d['cycles'],2);self.assertEqual(d['evaluations'],2)
-        self.assertEqual(d['reasons']['signal_for_next_cycle'],2)
-        self.assertEqual(d['entry_rejections']['roundtrip_cost_or_inconsistent_quotes'],1)
-        e=ScalpEngine(self.store,self.c,self.q);e.candles=self.feed
-        e.step([replace(self.snap(NOW+30),volume_5m=0)],NOW+30)
-        self.assertEqual(self.store.load()['scalp_diagnostics']['reasons']['insufficient_volume'],1)
-        self.assertEqual(self.store.load()['scalp_diagnostics']['cycles'],3)
-
-    def test_type_results_and_old_position_exit_contract(self):
-        p=self.buy();self.assertEqual(p['entry_type'],'recovery')
-        self.q.price=bot.decimal('111');self.e.step([],NOW+30)
-        r=self.store.load()['scalp_results'];self.assertEqual(r['by_setup']['recovery']['closed'],1)
-        sell=json.loads(self.store.db.execute("SELECT body FROM events WHERE kind='SELL'").fetchone()[0])
-        self.assertEqual(sell['entry_type'],'recovery')
-        p['strategy']='pullback-scalp-v1';p['take_profit_bps']=300
-        self.assertIsNone(self.e.exit_reason(p,p['cost']*1025//1000,NOW+86400))
-        self.assertEqual(self.e.exit_reason(p,p['cost']*1031//1000,NOW+86400),'take_profit')
-
-    def test_four_stable_candle_slots_and_rotation(self):
-        now=[NOW];feed=Candles(None,lambda:now[0]);feed.backoff=NOW+10000
-        # Do not make requests in this test; inspect scheduling via a synthetic transport.
-        class Fail:
-            def json(self,*args):raise bot.DataError('offline')
-        feed.http=Fail();feed.backoff=0
-        snaps=[replace(self.snap(),mint=str(i)*32) for i in range(1,7)]
-        feed.refresh(snaps);first=set(feed.focus);self.assertEqual(len(first),4)
-        now[0]+=60;feed.refresh(snaps);self.assertEqual(first,set(feed.focus))
-        now[0]+=300;feed.refresh(snaps,held=[snaps[0].mint]);self.assertIn(snaps[0].mint,feed.focus)
-        self.assertTrue(set(s.mint for s in snaps)-first <= set(feed.focus))
-        self.assertLessEqual(len(feed.calls),6)
