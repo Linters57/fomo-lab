@@ -1,7 +1,7 @@
 """Paper pullback/reclaim experiment. Closed pool candles; executable quote marks.
 
 No wallet, orders, inferred candles, intrabar fills or future-data backfills.
-See SCALPING-2026-10-13.md for the frozen forward-test hypotheses.
+See SCALPING-2026-10-15.md for the forward-test hypotheses.
 """
 from dataclasses import asdict, replace
 import json
@@ -12,14 +12,15 @@ from pathlib import Path
 from bot import Engine, Config, DataError, USD, SOL, decimal, mint_ok
 from active import ActiveEngine as LegacyEngine, ActiveMarket as LegacyMarket
 
-REVISION = 'pullback-scalp-v1'
-LIMITS = {'max_position': (10*USD, 200*USD), 'max_positions': (1, 4),
-          'stop_bps': (150, 250), 'take_profit_bps': (300, 600)}
-PROFILE = dict(id='active', name='Actief', strategy='Pullback scalping', revision=REVISION,
+REVISION = 'active-scalp-v2'
+LIMITS = {'max_position': (10*USD, 100*USD), 'max_positions': (1, 4),
+          'stop_bps': (50, 200), 'take_profit_bps': (200, 600)}
+PROFILE = dict(id='active', name='Actief', strategy='Herstel + uitbraak scalping', revision=REVISION,
     timed_exit=False, candle_source='GeckoTerminal · gesloten 1-minuutcandles',
-    description='Stijgende 15-minutentrend → terugval → bevestigd herstel. '
+    description='Stijgende 15-minutentrend → herstel of bevestigde uitbraak. '
     'Maximaal 0,8% gemodelleerde retourkosten; stop onder het lokale dieptepunt '
-    '(1,5–2,5% netto), winstdoel 3% netto. Verkoop bij patroonbreuk, geen verplichte '
+    '(maximaal 2% netto en $2 gepland verlies), winstdoel 2% netto. Maximaal $100 per positie. '
+    'Liquiditeit vanaf $200.000, 5-minutenvolume vanaf $10.000. Verkoop bij patroonbreuk, geen verplichte '
     'tijdsverkoop. Gratis minutencandles kunnen vertraagd zijn; zonder verse candles '
     'geen aankoop. Paperproef, geen bewezen rendement of FOMO-uitvoering.')
 
@@ -44,7 +45,9 @@ def migrate(path, target, now):
             p.setdefault('strategy', 'adaptive-exits-v2')
             p.setdefault('legacy_config', old)
         s['config'] = asdict(target)
-        s.update(dashboard_overrides={}, pending={}, history={}, scalp_consumed={}, scalp_losses={})
+        s.setdefault('scalp_archives', {})[s.get('active_revision',{}).get('id','previous')] = {
+            'baseline':s.get('active_revision'), 'results':s.get('scalp_results')}
+        s.update(dashboard_overrides={}, pending={}, history={}, scalp_consumed={}, scalp_losses={}, scalp_diagnostics={})
         s['active_revision'] = dict(id=REVISION, ts=now, equity=s['equity'],
             realized=s['realized'], closed=s['closed'], legacy_positions=len(s['positions']),
             cash_adjustments=s.get('cash_adjustments', 0))
@@ -68,7 +71,7 @@ def activate_new(store, now):
 
 
 class Candles:
-    """Free read-only feed: at most 8 requests/rolling minute, 2 per refresh.
+    """Free read-only feed: at most 6 requests/rolling minute, 2 per refresh.
 
     Resolve a liquid pool belonging to the mint, then request that exact token's
     USD candles (never assume it is the base asset). One-minute provider caching
@@ -81,6 +84,9 @@ class Candles:
         self.http, self.clock = http, clock
         self.pools, self.bars, self.attempts, self.errors = {}, {}, {}, {}
         self.calls, self.backoff = [], 0
+        self.focus, self.focus_until, self.last_focus = [], 0, {}
+        self.rate_failures, self.bad_bars = 0, {}
+        self.blocked_pools = {}
 
     @staticmethod
     def parse(data, now):
@@ -110,14 +116,22 @@ class Candles:
         self.calls = [t for t in self.calls if now-t < 60]
         if now < self.backoff:
             return
-        # Held tokens get reserved attention; rotate other candidates fairly.
-        ranked = sorted(snaps, key=lambda s: (s.mint not in held,-s.volume_5m,s.mint))[:10]
+        # Four stable slots can actually be refreshed within the free-feed budget.
+        # Rotate every five minutes; never rotate away an existing position.
+        available = {s.mint:s for s in snaps}
+        if now >= self.focus_until or not self.focus:
+            ranked = sorted(snaps,key=lambda s:(s.mint not in held,self.last_focus.get(s.mint,0),-s.volume_5m,s.mint))
+            self.focus = [s.mint for s in ranked[:4]]
+            for m in self.focus:self.last_focus[m]=now
+            self.focus_until=now+300
+        self.focus = list(dict.fromkeys([m for m in held if m in available]+[m for m in self.focus if m in available]))[:4]
+        ranked = [available[m] for m in self.focus]
         due = sorted(ranked, key=lambda s: (self.attempts.get(s.mint,0),s.mint not in held))
         begun = self.clock()
         requests = 0
         for s in due:
             now = int(self.clock())
-            if len(self.calls) >= 8 or self.clock()-begun >= 8:
+            if len(self.calls) >= 6 or self.clock()-begun >= 8:
                 break
             if now-self.attempts.get(s.mint,0) < 60:
                 continue
@@ -136,11 +150,13 @@ class Candles:
                         tokens = [rel[k]['data']['id'] for k in ('base_token','quote_token')]
                         address = a['address']
                         if ('solana_'+s.mint in tokens and mint_ok(address)
-                                and decimal(a.get('reserve_in_usd',0)) >= 500000):
-                            candidates.append((decimal(a['reserve_in_usd']),address))
+                                and self.blocked_pools.get((s.mint,address),0)<=now
+                                and decimal(a.get('reserve_in_usd',0)) >= 200000):
+                            volume=decimal((a.get('volume_usd') or {}).get('h24',0))
+                            candidates.append((volume,decimal(a['reserve_in_usd']),address))
                     if not candidates:
                         raise DataError('no_liquid_candle_pool')
-                    self.pools[s.mint] = dict(address=max(candidates)[1],ts=now)
+                    self.pools[s.mint] = dict(address=max(candidates)[2],ts=now)
                     self.bars.pop(s.mint,None)
                     # Pool lookup uses this turn's slot. Fetch chart next turn.
                     self.attempts[s.mint] = now-45
@@ -149,17 +165,33 @@ class Candles:
                         token=s.mint,include_empty_intervals='false'))
                     data = self.http.json(self.ROOT+'/pools/'+pool['address']+'/ohlcv/minute?'+query,self.HEADERS)
                     self.bars[s.mint] = self.parse(data,int(self.clock()))
+                    self.rate_failures=0
+                    if self.get(s.mint,int(self.clock()))[1]:
+                        self.bad_bars[s.mint]=self.bad_bars.get(s.mint,0)+1
+                        if self.bad_bars[s.mint]>=3:
+                            self.blocked_pools[(s.mint,pool['address'])]=now+1800
+                            self.pools.pop(s.mint,None)
+                            self.bad_bars[s.mint]=0
+                    else:self.bad_bars[s.mint]=0
                 self.errors.pop(s.mint,None)
             except (DataError,KeyError,TypeError,ValueError) as exc:
                 self.errors[s.mint] = str(exc)[:100]
                 self.bars.pop(s.mint,None)
+                if str(exc)=='invalid_candles' and pool:
+                    self.bad_bars[s.mint]=self.bad_bars.get(s.mint,0)+1
+                    if self.bad_bars[s.mint]>=3:
+                        self.blocked_pools[(s.mint,pool['address'])]=now+1800
+                        self.pools.pop(s.mint,None)
+                        self.bad_bars[s.mint]=0
                 if '429' in str(exc):
-                    self.backoff = now+60
+                    self.rate_failures=min(4,self.rate_failures+1)
+                    self.backoff = now+60*2**self.rate_failures
                     break
             if requests >= 2:
                 break
         keep = {s.mint for s in snaps} | set(held)
-        for cache in (self.pools,self.bars,self.attempts,self.errors):
+        self.blocked_pools={k:v for k,v in self.blocked_pools.items() if k[0] in keep and v>now}
+        for cache in (self.pools,self.bars,self.attempts,self.errors,self.last_focus,self.bad_bars):
             for mint in list(cache):
                 if mint not in keep:
                     del cache[mint]
@@ -180,6 +212,7 @@ class Candles:
     def health(self, now):
         ready = sum(self.get(m,now)[1] is None for m in self.bars)
         return dict(source='GeckoTerminal',timeframe='1m',ready=ready,tracked=len(self.attempts),
+                    focus=len(self.focus), focus_until=self.focus_until,
                     errors=dict(self.errors),backoff_until=self.backoff,
                     requests_last_minute=len([t for t in self.calls if now-t<60]))
 
@@ -190,7 +223,7 @@ class ScalpMarket(LegacyMarket):
         self.candles = Candles(http,clock)
 
     def collect(self, held=()):
-        # Broad discovery and batch prices; intensive candle work remains capped at 10.
+        # Broad discovery and batch prices; intensive candle work remains capped at four.
         original = self.config
         self.config = replace(original,max_candidates=80)
         self.watch.setdefault(SOL,int(self.clock())+1800)
@@ -201,10 +234,12 @@ class ScalpMarket(LegacyMarket):
         candidates = [s for s in snaps if s.mint in held or
             (s.safe and s.liquidity >= original.min_liquidity and
              s.volume_5m >= original.min_volume_5m and
+             s.buys_5m>=original.min_buys_5m and
+             s.buys_5m*10000>=original.min_buy_share_bps*max(1,s.buys_5m+s.sells_5m) and
              self.clock()-s.pair_created >= original.min_pair_age_seconds)]
         self.candles.refresh(candidates,held)
         self.discovery['candles'] = self.candles.health(int(self.clock()))
-        self.discovery['intensive_cap'] = 10
+        self.discovery['intensive_cap'] = 4
         return snaps
 
 
@@ -217,40 +252,37 @@ def ema(values, period):
 
 
 def setup_from_bars(bars, price):
-    """Use only closed bars. Recover part of a prior impulse without chasing it."""
+    """Two closed-bar hypotheses; later distinct price observation confirms entry."""
     closes = [decimal(b[4]) for b in bars]
     if not (closes[-1] > closes[-16] and ema(closes,5) > ema(closes,15)
             and ema(closes,15) > ema(closes[:-3],15)):
         return None,'scalp_trend_not_rising'
-    # Impulse peak must precede 1–4 pullback candles plus a recovery candle.
-    peak_index = max(range(12,18),key=lambda i: decimal(bars[i][2]))
-    peak = decimal(bars[peak_index][2])
-    trough_rows = bars[peak_index+1:-1]
-    if not trough_rows or len(trough_rows)>4:
-        return None,'scalp_wait_pullback'
-    trough_bar = min(trough_rows,key=lambda b: decimal(b[3]))
-    trough = decimal(trough_bar[3])
-    depth = (peak-trough)/peak
-    if not decimal('0.008') <= depth <= decimal('0.05'):
-        return None,'scalp_wait_pullback'
-    if peak < min(closes[7:peak_index])*decimal('1.015'):
-        return None,'scalp_weak_impulse'
-    last, prev = bars[-1],bars[-2]
-    trigger = decimal(prev[2])
-    if not (decimal(last[4]) > trigger and decimal(last[4]) > decimal(last[1])
-            and decimal(last[5]) >= decimal(prev[5])*decimal('0.8')):
+    last, prev = bars[-1], bars[-2]
+    resistance = max(decimal(b[2]) for b in bars[-6:-1])
+    recovery = (closes[-1] > closes[-2] and closes[-1] > decimal(last[1])
+                and decimal(last[5]) >= decimal(prev[5])*decimal('0.8'))
+    if not recovery:
         return None,'scalp_wait_reclaim'
-    if price < trigger or price > decimal(last[4])*decimal('1.005'):
+    if closes[-1] > resistance and closes[-2] > closes[-3]:
+        kind, trigger = 'breakout', resistance
+        trough_bar = min(bars[-3:],key=lambda b: decimal(b[3]))
+    else:
+        trough_bar = min(bars[-5:-1],key=lambda b: decimal(b[3]))
+        depth = (resistance-decimal(trough_bar[3]))/resistance
+        if not decimal('0.002') <= depth <= decimal('0.05'):
+            return None,'scalp_wait_pullback'
+        kind, trigger = 'recovery', closes[-2]
+    if price < trigger or price > closes[-1]*decimal('1.005'):
         return None,'scalp_reclaim_moved'
-    # Noise buffer based on recent mean true range, not fabricated tick candles.
     tr = [max(decimal(b[2])-decimal(b[3]),abs(decimal(b[2])-closes[i-1]),
               abs(decimal(b[3])-closes[i-1])) for i,b in enumerate(bars) if i>0]
     buffer = max(price*decimal('0.001'),sum(tr[-14:])/14*decimal('0.15'))
-    stop = trough-buffer
+    stop = decimal(trough_bar[3])-buffer
     if stop <= 0 or stop >= price:
         return None,'scalp_invalid_stop'
-    return dict(id=str(bars[peak_index][0])+':'+str(trough_bar[0]),
-                bar=last[0],stop_price=str(stop),reclaim=str(trigger),resistance=str(peak)),None
+    return dict(id=kind+':'+str(last[0])+':'+str(trough_bar[0]),type=kind,
+                bar=last[0],stop_price=str(stop),reclaim=str(trigger),resistance=str(resistance),
+                room_to_peak_bps=str((resistance/price-1)*10000)),None
 
 
 class ScalpEngine(Engine):
@@ -265,7 +297,31 @@ class ScalpEngine(Engine):
         self.current = {s.mint:s for s in snapshots}
         self.consumed = self.store.load().get('scalp_consumed',{})
         self.setups = {}
-        return super().step(snapshots,ts,discovery)
+        before = self.store.db.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()[0]
+        state = super().step(snapshots,ts,discovery)
+        # Count evaluations, not unique assets. Signal and quote rejection stages are separate.
+        rows = self.store.db.execute('SELECT kind,body FROM events WHERE id>?', (before,)).fetchall()
+        if not rows:return state
+        with self.store.db:
+            d=state.setdefault('scalp_diagnostics',dict(since=ts,cycles=0,evaluations=0,reasons={},entry_rejections={}))
+            if not d:d.update(since=ts,cycles=0,evaluations=0,reasons={},entry_rejections={})
+            for kind,raw in rows:
+                e=json.loads(raw)
+                if kind=='SCAN':
+                    d['cycles']+=1;d['last']={}
+                    for reason in e['reasons'].values():
+                        key=reason.split(':')[0]
+                        d['reasons'][key]=d['reasons'].get(key,0)+1
+                        d['last'][key]=d['last'].get(key,0)+1
+                        d['evaluations']+=1
+                elif kind=='REJECT':
+                    key=e['reason'].split(':')[0][:80]
+                    counts=d['entry_rejections']
+                    if key not in counts and len(counts)>=40:key='other_quote_error'
+                    counts[key]=counts.get(key,0)+1
+            d['updated_at']=ts
+            self.store.save(state)
+        return state
 
     def pending_items(self,pending,current):
         return sorted(pending.items(),key=lambda item: -current[item[0]].volume_5m if item[0] in current else 0)[:1]
@@ -276,8 +332,8 @@ class ScalpEngine(Engine):
             return 'stale_market'
         if snap.safe is not True:
             return 'mint_check:'+snap.safety_reason
-        if snap.liquidity<c.min_liquidity or snap.volume_5m<c.min_volume_5m:
-            return 'liquidity_or_volume'
+        if snap.liquidity<c.min_liquidity:return 'insufficient_liquidity'
+        if snap.volume_5m<c.min_volume_5m:return 'insufficient_volume'
         if not 0<snap.pair_created<=ts-c.min_pair_age_seconds:
             return 'pair_too_young_or_unknown'
         if snap.buys_5m<c.min_buys_5m or snap.buys_5m*10000<c.min_buy_share_bps*max(1,snap.buys_5m+snap.sells_5m):
@@ -286,7 +342,7 @@ class ScalpEngine(Engine):
             return 'candles_unavailable'
         bars,reason = self.candles.get(snap.mint,ts)
         if reason:
-            return reason
+            return 'candle_feed_backoff' if ts<self.candles.backoff else reason
         price=decimal(snap.price)
         if abs(price/decimal(bars[-1][4])-1)>decimal('0.015'):
             return 'candle_quote_divergence'
@@ -313,14 +369,10 @@ class ScalpEngine(Engine):
         price=decimal(snap.price)
         stop_net=int(decimal(budget-drag)*decimal(setup['stop_price'])/price)
         loss=budget-stop_net
-        if loss*10000<budget*150 or loss*10000>budget*self.c.stop_bps:
+        if loss<=0 or loss*10000>budget*self.c.stop_bps:
             return 'scalp_stop_outside_budget'
         if loss>self.c.risk_per_trade:
             return 'scalp_stop_outside_budget'
-        # Past resistance is a filter, not a forecast of future profit.
-        target=decimal(budget)*(1+decimal(self.c.take_profit_bps)/10000)
-        if decimal(budget-drag)*decimal(setup['resistance'])/price<target:
-            return 'scalp_insufficient_upside'
         return None
 
     def position_fields(self,snap,budget,proceeds,ts):
@@ -328,7 +380,7 @@ class ScalpEngine(Engine):
         floor=int(decimal(proceeds)*decimal(setup['stop_price'])/decimal(snap.price))
         return dict(strategy=REVISION,mint=snap.mint,setup=setup,stop_floor=floor,
                     stop_floor_reason='scalp_structure_stop',take_profit_bps=self.c.take_profit_bps,
-                    entry_price=snap.price)
+                    entry_price=snap.price,entry_type=setup['type'])
 
     def on_open(self,state,mint,pos):
         state.setdefault('scalp_consumed',{})[mint]=pos['setup']['id']
@@ -345,9 +397,11 @@ class ScalpEngine(Engine):
         r=state.setdefault('scalp_results',dict(closed=0,wins=0,pnl=0,gross_wins=0,gross_losses=0))
         r['closed']+=1;r['wins']+=int(pnl>0);r['pnl']+=pnl
         r['gross_wins']+=max(0,pnl);r['gross_losses']+=max(0,-pnl)
+        by=r.setdefault('by_setup',{}).setdefault(pos['setup']['type'],dict(closed=0,wins=0,pnl=0))
+        by['closed']+=1;by['wins']+=int(pnl>0);by['pnl']+=pnl
 
     def exit_reason(self,pos,net,ts):
-        if pos.get('strategy')!=REVISION:
+        if pos.get('strategy') not in (REVISION,'pullback-scalp-v1'):
             legacy=LegacyEngine(self.store,Config(**pos.get('legacy_config',asdict(self.c))),self.quotes)
             return legacy.exit_reason(pos,net,ts)
         if net<=pos['stop_floor']:return 'scalp_structure_stop'

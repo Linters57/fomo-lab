@@ -596,7 +596,7 @@ class Engine:
                     closed_this_cycle.add(mint)
                     db.event(ts, 'SELL', mint=mint, symbol=pos['symbol'], quantity=pos['quantity'],
                              proceeds=net, pnl=pnl, reason=reason, quote=asdict(q),
-                             strategy=pos.get('strategy'), opened=pos['opened'],
+                             strategy=pos.get('strategy'), entry_type=pos.get('entry_type'), opened=pos['opened'],
                              cost=pos['cost'], partial=False, closed=True,
                              trade_pnl=trade_pnl, realized_partial=pos.get('realized_partial',0),
                              trade_id=pos.get('trade_id'))
